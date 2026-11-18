@@ -3606,6 +3606,18 @@ CREATE TABLE `software_title_team_pins` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `software_title_team_update_delays` (
+  `team_id` int unsigned NOT NULL,
+  `title_id` int unsigned NOT NULL,
+  `update_delay_days` smallint unsigned NOT NULL,
+  `updated_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`team_id`,`title_id`),
+  KEY `fk_update_delay_title` (`title_id`),
+  CONSTRAINT `fk_update_delay_title` FOREIGN KEY (`title_id`) REFERENCES `software_titles` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `software_titles` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,

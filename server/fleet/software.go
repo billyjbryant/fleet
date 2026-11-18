@@ -472,6 +472,8 @@ type FMAAutoUpdateCandidate struct {
 	// InstallScriptEdited and UninstallScriptEdited are the active installer's flags.
 	InstallScriptEdited   bool `db:"install_script_edited"`
 	UninstallScriptEdited bool `db:"uninstall_script_edited"`
+	// UpdateDelayDays is the app's per-fleet update delay, nil when unset.
+	UpdateDelayDays *uint `db:"update_delay_days"`
 }
 
 // SoftwareTitle represents a title backed by the `software_titles` table.

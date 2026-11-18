@@ -885,10 +885,7 @@ func (ds *Datastore) ResolveActiveInstallerForRetry(ctx context.Context, install
 	}
 }
 
-func (ds *Datastore) ListFleetMaintainedAppActiveInstallers(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
-	var candidates []fleet.FMAAutoUpdateCandidate
-	// team_id is NULL for the no-team scope, so it scans straight into the nil *uint.
-	err := sqlx.SelectContext(ctx, ds.reader(ctx), &candidates, `
+const fmaActiveInstallerCandidateSelect = `
 		SELECT
 			si.team_id,
 			si.title_id,
@@ -897,15 +894,34 @@ func (ds *Datastore) ListFleetMaintainedAppActiveInstallers(ctx context.Context)
 			si.version,
 			si.install_script_edited,
 			si.uninstall_script_edited,
-			fma.slug
+			fma.slug,
+			d.update_delay_days
 		FROM software_installers si
 		INNER JOIN fleet_maintained_apps fma ON fma.id = si.fleet_maintained_app_id
-		WHERE si.fleet_maintained_app_id IS NOT NULL AND si.is_active = 1
-	`)
-	if err != nil {
+		LEFT JOIN software_title_team_update_delays d ON d.team_id = si.global_or_team_id AND d.title_id = si.title_id
+		WHERE si.fleet_maintained_app_id IS NOT NULL AND si.is_active = 1`
+
+func (ds *Datastore) ListFleetMaintainedAppActiveInstallers(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
+	var candidates []fleet.FMAAutoUpdateCandidate
+	// team_id is NULL for the no-team scope, so it scans straight into the nil *uint.
+	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &candidates, fmaActiveInstallerCandidateSelect); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "listing active fleet-maintained app installers")
 	}
 	return candidates, nil
+}
+
+func (ds *Datastore) GetFleetMaintainedAppActiveInstaller(ctx context.Context, teamID *uint, titleID uint) (*fleet.FMAAutoUpdateCandidate, error) {
+	var candidate fleet.FMAAutoUpdateCandidate
+	err := sqlx.GetContext(ctx, ds.reader(ctx), &candidate,
+		fmaActiveInstallerCandidateSelect+` AND si.global_or_team_id = ? AND si.title_id = ?`,
+		ptr.ValOrZero(teamID), titleID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ctxerr.Wrap(ctx, notFound("FleetMaintainedAppActiveInstaller").WithID(titleID), "get active fleet-maintained app installer")
+	case err != nil:
+		return nil, ctxerr.Wrap(ctx, err, "get active fleet-maintained app installer")
+	}
+	return &candidate, nil
 }
 
 // InsertFleetMaintainedAppVersion caches a newly downloaded version of an
@@ -5376,6 +5392,51 @@ func setPinnedVersionDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID 
 func deletePinnedVersionDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID uint, titleID uint) error {
 	_, err := ex.ExecContext(ctx, `
 		DELETE FROM software_title_team_pins WHERE team_id = ? AND title_id = ?
+	`, globalOrTeamID, titleID)
+	return err
+}
+
+// GetFMAUpdateDelay returns the per-app update delay in days, or nil when none is set.
+func (ds *Datastore) GetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) (*uint, error) {
+	var days uint
+	err := sqlx.GetContext(ctx, ds.reader(ctx), &days, `
+		SELECT update_delay_days FROM software_title_team_update_delays WHERE team_id = ? AND title_id = ?
+	`, ptr.ValOrZero(teamID), titleID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, ctxerr.Wrap(ctx, err, "get FMA update delay")
+	}
+	return &days, nil
+}
+
+func (ds *Datastore) SetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint, days uint) error {
+	if err := setFMAUpdateDelayDB(ctx, ds.writer(ctx), ptr.ValOrZero(teamID), titleID, days); err != nil {
+		return ctxerr.Wrap(ctx, err, "set FMA update delay")
+	}
+	return nil
+}
+
+func (ds *Datastore) DeleteFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) error {
+	if err := deleteFMAUpdateDelayDB(ctx, ds.writer(ctx), ptr.ValOrZero(teamID), titleID); err != nil {
+		return ctxerr.Wrap(ctx, err, "delete FMA update delay")
+	}
+	return nil
+}
+
+func setFMAUpdateDelayDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID uint, titleID uint, days uint) error {
+	_, err := ex.ExecContext(ctx, `
+		INSERT INTO software_title_team_update_delays (team_id, title_id, update_delay_days)
+		VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE update_delay_days = VALUES(update_delay_days)
+	`, globalOrTeamID, titleID, days)
+	return err
+}
+
+func deleteFMAUpdateDelayDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID uint, titleID uint) error {
+	_, err := ex.ExecContext(ctx, `
+		DELETE FROM software_title_team_update_delays WHERE team_id = ? AND title_id = ?
 	`, globalOrTeamID, titleID)
 	return err
 }

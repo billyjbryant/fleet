@@ -200,6 +200,7 @@ var teamRefs = []string{
 	"software_title_icons",
 	"software_title_display_names",
 	"software_title_team_pins",
+	"software_title_team_update_delays",
 	"software_categories",
 	"patch_deadline_settings",
 }
