@@ -446,6 +446,9 @@ type FleetMaintainedVersion struct {
 	Filename string `json:"filename" db:"filename"`
 	// UploadedAt is when this version was added to the database.
 	UploadedAt time.Time `json:"uploaded_at" db:"uploaded_at"`
+	// FirstSeenAt is when this version's installer bytes were first stored. Unlike
+	// UploadedAt, it isn't bumped when the version is re-marked as current.
+	FirstSeenAt time.Time `json:"first_seen_at" db:"first_seen_at"`
 }
 
 // FMAAutoUpdateCandidate is the active installer for one (team, title) backed

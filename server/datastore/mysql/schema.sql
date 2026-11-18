@@ -3533,6 +3533,7 @@ CREATE TABLE `software_installers` (
   `app_open_query` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT (_utf8mb4''),
   `install_script_edited` tinyint(1) NOT NULL DEFAULT '0',
   `uninstall_script_edited` tinyint(1) NOT NULL DEFAULT '0',
+  `first_seen_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_software_installers_dedup` (`global_or_team_id`,`title_id`,`dedup_token`),
   KEY `fk_software_installers_title` (`title_id`),

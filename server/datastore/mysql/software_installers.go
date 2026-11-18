@@ -1023,7 +1023,7 @@ FROM software_installers WHERE id = ?`,
 						storage_id = ?, filename = ?, extension = ?, url = ?, upgrade_code = ?,
 						install_script_content_id = IF(install_script_edited, install_script_content_id, ?),
 						uninstall_script_content_id = IF(uninstall_script_edited, uninstall_script_content_id, ?),
-						patch_query = ?, app_open_query = ?, package_ids = ?, uploaded_at = NOW(6)
+						patch_query = ?, app_open_query = ?, package_ids = ?, uploaded_at = NOW(6), first_seen_at = NOW(6)
 					WHERE id = ?`,
 					payload.StorageID, payload.Filename, payload.Extension, payload.URL, payload.UpgradeCode,
 					installScriptID, uninstallScriptID,
@@ -3233,6 +3233,7 @@ ON DUPLICATE KEY UPDATE
   install_script_content_id = VALUES(install_script_content_id),
   uninstall_script_content_id = VALUES(uninstall_script_content_id),
   post_install_script_content_id = VALUES(post_install_script_content_id),
+  first_seen_at = IF(storage_id <> VALUES(storage_id), NOW(6), first_seen_at),
   storage_id = VALUES(storage_id),
   filename = VALUES(filename),
   extension = VALUES(extension),
