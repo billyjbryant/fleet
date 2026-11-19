@@ -203,6 +203,9 @@
         "idp_name": ""
       }
     },
+    "fleet_maintained_app_settings": {
+      "update_delay_days": null
+    },
     "gitops": {
       "gitops_mode_enabled": false,
       "repository_url": "",

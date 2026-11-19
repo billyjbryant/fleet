@@ -1122,6 +1122,8 @@ type AppConfig struct {
 
 	MDM MDM `json:"mdm"`
 
+	FleetMaintainedAppSettings FleetMaintainedAppSettings `json:"fleet_maintained_app_settings"`
+
 	GitOpsConfig GitOpsConfig `json:"gitops"`
 
 	YaraRules []YaraRule `json:"yara_rules,omitempty"`
