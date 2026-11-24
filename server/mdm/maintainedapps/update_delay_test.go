@@ -159,3 +159,11 @@ func TestPendingVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestVersionEligibleZeroDelayIgnoresFirstSeenAt(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	future := fleet.FleetMaintainedVersion{ID: 1, Version: "1.0", FirstSeenAt: now.Add(time.Hour)}
+	assert.True(t, VersionEligible(future, 0, now))
+	assert.False(t, VersionEligible(future, time.Hour, now))
+	assert.True(t, VersionEligible(fleet.FleetMaintainedVersion{}, 0, now))
+}

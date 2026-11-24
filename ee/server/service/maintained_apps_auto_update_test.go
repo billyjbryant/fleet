@@ -140,6 +140,21 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 			wantFlip:  false,
 		},
 		{
+			name:         "delay 0 promotes a newest version first seen after now",
+			active:       candidate(9, "148.0.1"),
+			cached:       []fleet.FleetMaintainedVersion{{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(-1)}, {ID: 9, Version: "148.0.1", FirstSeenAt: daysAgo(30)}},
+			wantFlip:     true,
+			wantActiveID: 12,
+		},
+		{
+			name:         "delay 0 with caret promotes an in-major version first seen after now",
+			pin:          new("^147"),
+			active:       candidate(8, "147.0.5"),
+			cached:       []fleet.FleetMaintainedVersion{{ID: 11, Version: "147.0.9", FirstSeenAt: daysAgo(-1)}, {ID: 8, Version: "147.0.5", FirstSeenAt: daysAgo(30)}},
+			wantFlip:     true,
+			wantActiveID: 11,
+		},
+		{
 			name:     "literal pin never advances",
 			pin:      new("148.0.1"),
 			active:   candidate(9, "148.0.1"),

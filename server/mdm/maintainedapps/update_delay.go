@@ -23,8 +23,13 @@ func UpdateDelayDuration(days uint) time.Duration {
 }
 
 // VersionEligible reports whether v has been cached for at least delay as of
-// now, so it may be promoted to the active version.
+// now, so it may be promoted to the active version. With no delay every version
+// is eligible: first_seen_at is the database's clock and can read later than
+// now, so it must not gate a version that has nothing to wait for.
 func VersionEligible(v fleet.FleetMaintainedVersion, delay time.Duration, now time.Time) bool {
+	if delay <= 0 {
+		return true
+	}
 	return !v.FirstSeenAt.After(now.Add(-delay))
 }
 
