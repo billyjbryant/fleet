@@ -811,7 +811,7 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 			activeInstallerID = versions[0].ID
 		case usesCaret:
 			for _, v := range versions {
-				if versionMatchesMajor(v.Version, majorVersionString) {
+				if maintained_apps.VersionMatchesMajor(v.Version, majorVersionString) {
 					activeInstallerID = v.ID
 					break
 				}
@@ -3201,7 +3201,7 @@ func (svc *Service) softwareInstallerPayloadFromMaintainedApp(ctx context.Contex
 	}
 
 	if usesCaret {
-		if !versionMatchesMajor(app.Version, majorVersionString) {
+		if !maintained_apps.VersionMatchesMajor(app.Version, majorVersionString) {
 			// We cannot use the FMA we just got the manifest for since it is on a different major
 			// version, so we try to find the latest cached version and use that instead.
 			if app.TitleID == nil {
@@ -3215,7 +3215,7 @@ func (svc *Service) softwareInstallerPayloadFromMaintainedApp(ctx context.Contex
 			// pinned major is the one to fall back to.
 			pinnedVersion := ""
 			for _, version := range versions {
-				if versionMatchesMajor(version.Version, majorVersionString) {
+				if maintained_apps.VersionMatchesMajor(version.Version, majorVersionString) {
 					pinnedVersion = version.Version
 					break
 				}
@@ -4256,6 +4256,21 @@ func (svc *Service) softwareBatchUpload(
 		return
 	}
 
+	delays := maintained_apps.NewUpdateDelayResolver(svc.ds)
+	for _, payloadWithExtras := range installers {
+		for _, p := range append([]*fleet.UploadSoftwareInstallerPayload{payloadWithExtras.UploadSoftwareInstallerPayload}, payloadWithExtras.ExtraInstallers...) {
+			if p.FleetMaintainedAppID == nil {
+				continue
+			}
+			days, _, err := delays.Resolve(ctx, teamID, p.FMAUpdateDelayDays)
+			if err != nil {
+				batchErr = fmt.Errorf("resolving update delay for %q: %w", p.Filename, err)
+				return
+			}
+			p.FMAEffectiveUpdateDelayDays = days
+		}
+	}
+
 	var inHouseInstallers, softwareInstallers []*fleet.UploadSoftwareInstallerPayload
 	for _, payloadWithExtras := range installers {
 		payload := payloadWithExtras.UploadSoftwareInstallerPayload
@@ -5108,11 +5123,6 @@ func parsePinnedVersion(ctx context.Context, version string) (trimmedVersion str
 		}
 	}
 	return trimmedVersion, usesCaret, nil
-}
-
-func versionMatchesMajor(version string, majorVersion string) bool {
-	versionMajor, _, _ := strings.Cut(version, ".")
-	return versionMajor == majorVersion
 }
 
 func (svc *Service) resetInstallAttemptsForInstallers(ctx context.Context, installerIDs []uint) {

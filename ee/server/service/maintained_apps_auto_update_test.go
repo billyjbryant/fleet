@@ -9,10 +9,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// stubUpdateDelayConfig makes every scope resolve to an org-level update delay of days (0 leaves it unset).
+func stubUpdateDelayConfig(ds *mock.Store, days int) {
+	var settings fleet.FleetMaintainedAppSettings
+	if days > 0 {
+		settings.UpdateDelayDays = optjson.SetInt(days)
+	}
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
+		return &fleet.AppConfig{FleetMaintainedAppSettings: settings}, nil
+	}
+	ds.TeamLiteFunc = func(ctx context.Context, id uint) (*fleet.TeamLite, error) {
+		return &fleet.TeamLite{ID: id}, nil
+	}
+	ds.DefaultTeamConfigFunc = func(ctx context.Context) (*fleet.TeamConfig, error) {
+		return &fleet.TeamConfig{}, nil
+	}
+}
 
 func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 	// Cached versions for the title, most recently downloaded first (as the real
@@ -25,6 +43,7 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 	}
 
 	teamID := uint(1)
+	daysAgo := func(d int) time.Time { return time.Now().UTC().Add(-time.Duration(d) * 24 * time.Hour) }
 	candidate := func(activeID uint, activeVer string) fleet.FMAAutoUpdateCandidate {
 		return fleet.FMAAutoUpdateCandidate{
 			TeamID:      &teamID,
@@ -43,6 +62,7 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 		cached       []fleet.FleetMaintainedVersion
 		wantFlip     bool
 		wantActiveID uint // installer ID bound active (when wantFlip)
+		delayDays    int
 	}{
 		{
 			name:         "Latest advances to newest cached",
@@ -75,6 +95,66 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 			wantFlip: false,
 		},
 		{
+			name:      "delay holds a newest version seen 2 days ago",
+			active:    candidate(9, "148.0.1"),
+			cached:    []fleet.FleetMaintainedVersion{{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(2)}, {ID: 9, Version: "148.0.1", FirstSeenAt: daysAgo(30)}},
+			delayDays: 7,
+			wantFlip:  false,
+		},
+		{
+			name:         "delay promotes a newest version seen 8 days ago",
+			active:       candidate(9, "148.0.1"),
+			cached:       []fleet.FleetMaintainedVersion{{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(8)}, {ID: 9, Version: "148.0.1", FirstSeenAt: daysAgo(30)}},
+			delayDays:    7,
+			wantFlip:     true,
+			wantActiveID: 12,
+		},
+		{
+			name:   "delay promotes the next-newest eligible version",
+			active: candidate(8, "147.0.5"),
+			cached: []fleet.FleetMaintainedVersion{
+				{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(2)},
+				{ID: 11, Version: "148.0.1", FirstSeenAt: daysAgo(9)},
+				{ID: 8, Version: "147.0.5", FirstSeenAt: daysAgo(30)},
+			},
+			delayDays:    7,
+			wantFlip:     true,
+			wantActiveID: 11,
+		},
+		{
+			name:   "delay never downgrades below a recently activated version",
+			active: candidate(12, "149.0.2"),
+			cached: []fleet.FleetMaintainedVersion{
+				{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(1)},
+				{ID: 11, Version: "148.0.1", FirstSeenAt: daysAgo(30)},
+			},
+			delayDays: 7,
+			wantFlip:  false,
+		},
+		{
+			name:      "caret with delay and only an out-of-major eligible version",
+			pin:       new("^147"),
+			active:    candidate(8, "147.0.5"),
+			cached:    []fleet.FleetMaintainedVersion{{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(30)}, {ID: 8, Version: "147.0.5", FirstSeenAt: daysAgo(30)}},
+			delayDays: 7,
+			wantFlip:  false,
+		},
+		{
+			name:         "delay 0 promotes a newest version first seen after now",
+			active:       candidate(9, "148.0.1"),
+			cached:       []fleet.FleetMaintainedVersion{{ID: 12, Version: "149.0.2", FirstSeenAt: daysAgo(-1)}, {ID: 9, Version: "148.0.1", FirstSeenAt: daysAgo(30)}},
+			wantFlip:     true,
+			wantActiveID: 12,
+		},
+		{
+			name:         "delay 0 with caret promotes an in-major version first seen after now",
+			pin:          new("^147"),
+			active:       candidate(8, "147.0.5"),
+			cached:       []fleet.FleetMaintainedVersion{{ID: 11, Version: "147.0.9", FirstSeenAt: daysAgo(-1)}, {ID: 8, Version: "147.0.5", FirstSeenAt: daysAgo(30)}},
+			wantFlip:     true,
+			wantActiveID: 11,
+		},
+		{
 			name:     "literal pin never advances",
 			pin:      new("148.0.1"),
 			active:   candidate(9, "148.0.1"),
@@ -87,6 +167,7 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ds := new(mock.Store)
 			ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error { return nil }
+			stubUpdateDelayConfig(ds, tc.delayDays)
 
 			ds.ListFleetMaintainedAppActiveInstallersFunc = func(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
 				return []fleet.FMAAutoUpdateCandidate{tc.active}, nil
@@ -129,6 +210,7 @@ func TestAutoUpdateFleetMaintainedApps(t *testing.T) {
 
 func TestAutoUpdateFleetMaintainedAppsContinuesPastError(t *testing.T) {
 	ds := new(mock.Store)
+	stubUpdateDelayConfig(ds, 0)
 	ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error { return errors.New("sync boom") }
 	teamID := uint(1)
 	ds.ListFleetMaintainedAppActiveInstallersFunc = func(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
@@ -165,6 +247,7 @@ func TestAutoUpdateFleetMaintainedAppsContinuesPastError(t *testing.T) {
 
 func TestAutoUpdateFleetMaintainedAppsBoundsPatchPolicySync(t *testing.T) {
 	ds := new(mock.Store)
+	stubUpdateDelayConfig(ds, 0)
 	ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error {
 		deadline, ok := ctx.Deadline()
 		require.True(t, ok, "patch policy sync must have its own deadline")
@@ -190,6 +273,7 @@ func TestAutoUpdateFleetMaintainedAppsBoundsPatchPolicySync(t *testing.T) {
 
 func TestAutoUpdateFleetMaintainedAppsReportsCancelDuringLastApp(t *testing.T) {
 	ds := new(mock.Store)
+	stubUpdateDelayConfig(ds, 0)
 	ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error { return nil }
 	teamID := uint(1)
 	ctx, cancel := context.WithCancel(context.Background())

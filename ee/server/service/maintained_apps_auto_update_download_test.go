@@ -6,17 +6,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	ma "github.com/fleetdm/fleet/v4/ee/maintained-apps"
+	"github.com/fleetdm/fleet/v4/pkg/fleethttp"
 	"github.com/fleetdm/fleet/v4/server/dev_mode"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	maintained_apps "github.com/fleetdm/fleet/v4/server/mdm/maintainedapps"
 	"github.com/fleetdm/fleet/v4/server/mock"
 	mocksoftware "github.com/fleetdm/fleet/v4/server/mock/software"
 	"github.com/stretchr/testify/require"
@@ -124,6 +129,7 @@ func baseDownloadStore(t *testing.T, activeVersion string, activeID uint) *mock.
 func baseDownloadStoreWithEditedScripts(t *testing.T, activeVersion string, activeID uint, installEdited bool, uninstallEdited bool) *mock.Store {
 	ds := new(mock.Store)
 	ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error { return nil }
+	stubUpdateDelayConfig(ds, 0)
 	teamID := uint(1)
 	ds.ListFleetMaintainedAppActiveInstallersFunc = func(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
 		return []fleet.FMAAutoUpdateCandidate{{
@@ -399,6 +405,7 @@ func TestAutoUpdateCaretMajorExceededSkipsDownload(t *testing.T) {
 func TestAutoUpdateFetchesManifestOncePerSlug(t *testing.T) {
 	srv := newFakeManifestServer(t)
 	ds := new(mock.Store)
+	stubUpdateDelayConfig(ds, 0)
 	ds.SyncPatchPolicyQueriesFunc = func(ctx context.Context) error { return nil }
 	teamA, teamB := uint(1), uint(2)
 	ds.ListFleetMaintainedAppActiveInstallersFunc = func(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error) {
@@ -707,4 +714,134 @@ func TestAutoUpdateCachedSharedHashRepair(t *testing.T) {
 
 func TestAutoUpdateNoCheckLatestCachedMissingBytes(t *testing.T) {
 	testAutoUpdateCachedMissingBytes(t, true, true, false)
+}
+
+func TestAutoUpdateHoldsDownloadWhilePending(t *testing.T) {
+	day := 24 * time.Hour
+	now := time.Now().UTC()
+
+	t.Run("pending version holds the download", func(t *testing.T) {
+		srv := newFakeManifestServer(t)
+		ds := baseDownloadStore(t, "149.0.0", 9)
+		stubUpdateDelayConfig(ds, 7)
+		ds.GetFleetMaintainedVersionsByTitleIDFunc = func(ctx context.Context, tmID *uint, titleID uint) ([]fleet.FleetMaintainedVersion, error) {
+			return []fleet.FleetMaintainedVersion{
+				{ID: 13, Version: "149.5.0", FirstSeenAt: now.Add(-2 * day)},
+				{ID: 9, Version: "149.0.0", FirstSeenAt: now.Add(-30 * day)},
+			}, nil
+		}
+		ds.InsertFleetMaintainedAppVersionFunc = func(ctx context.Context, activeInstallerID uint, payload *fleet.UploadSoftwareInstallerPayload) (uint, error) {
+			t.Fatal("must not cache a new version while one is pending")
+			return 0, nil
+		}
+
+		require.NoError(t, AutoUpdateFleetMaintainedApps(context.Background(), ds, memStore(), discardLogger()))
+		require.False(t, ds.InsertFleetMaintainedAppVersionFuncInvoked)
+		require.Equal(t, 0, srv.installerHits)
+		require.False(t, ds.SetFleetMaintainedAppActiveInstallerFuncInvoked)
+	})
+
+	t.Run("no pending version downloads", func(t *testing.T) {
+		srv := newFakeManifestServer(t)
+		ds := baseDownloadStore(t, "149.0.0", 9)
+		stubUpdateDelayConfig(ds, 7)
+		ds.GetFleetMaintainedVersionsByTitleIDFunc = func(ctx context.Context, tmID *uint, titleID uint) ([]fleet.FleetMaintainedVersion, error) {
+			return []fleet.FleetMaintainedVersion{{ID: 9, Version: "149.0.0", FirstSeenAt: now.Add(-30 * day)}}, nil
+		}
+		ds.InsertFleetMaintainedAppVersionFunc = func(ctx context.Context, activeInstallerID uint, payload *fleet.UploadSoftwareInstallerPayload) (uint, error) {
+			return 13, nil
+		}
+
+		require.NoError(t, AutoUpdateFleetMaintainedApps(context.Background(), ds, memStore(), discardLogger()))
+		require.True(t, ds.InsertFleetMaintainedAppVersionFuncInvoked)
+		require.Equal(t, 1, srv.installerHits)
+	})
+
+	t.Run("pending version outside the caret major does not hold", func(t *testing.T) {
+		srv := newFakeManifestServer(t)
+		ds := baseDownloadStore(t, "147.0.5", 8)
+		stubUpdateDelayConfig(ds, 7)
+		pin := "^147"
+		ds.GetPinnedVersionFunc = func(ctx context.Context, tmID *uint, titleID uint) (*string, error) { return &pin, nil }
+		ds.GetFleetMaintainedVersionsByTitleIDFunc = func(ctx context.Context, tmID *uint, titleID uint) ([]fleet.FleetMaintainedVersion, error) {
+			return []fleet.FleetMaintainedVersion{
+				{ID: 13, Version: "149.5.0", FirstSeenAt: now.Add(-2 * day)},
+				{ID: 8, Version: "147.0.5", FirstSeenAt: now.Add(-30 * day)},
+			}, nil
+		}
+
+		require.NoError(t, AutoUpdateFleetMaintainedApps(context.Background(), ds, memStore(), discardLogger()))
+		require.Equal(t, 1, srv.manifestHits, "the download path still ran and fetched the manifest")
+	})
+}
+
+func TestAutoUpdateDelayDoesNotStarveFastReleases(t *testing.T) {
+	srv := newFakeManifestServer(t)
+	delay := 7 * 24 * time.Hour
+	start := time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC)
+
+	ds := baseDownloadStore(t, "149.0.0", 1)
+	stubUpdateDelayConfig(ds, 7)
+
+	// Two-slot cache, newest first, evicting like the datastore: keep the active row and the new one.
+	cache := []fleet.FleetMaintainedVersion{{ID: 1, Version: "149.0.0", FirstSeenAt: start.Add(-30 * 24 * time.Hour)}}
+	activeID := uint(1)
+	nextID := uint(2)
+	var now time.Time
+	promoted := map[uint]time.Time{}
+
+	ds.GetFleetMaintainedVersionsByTitleIDFunc = func(ctx context.Context, tmID *uint, titleID uint) ([]fleet.FleetMaintainedVersion, error) {
+		return slices.Clone(cache), nil
+	}
+	ds.HasFMAInstallerVersionFunc = func(ctx context.Context, tmID *uint, fmaID uint, version string) (bool, string, error) {
+		for _, v := range cache {
+			if v.Version == version {
+				return true, srv.sha, nil
+			}
+		}
+		return false, "", nil
+	}
+	ds.InsertFleetMaintainedAppVersionFunc = func(ctx context.Context, activeInstallerID uint, payload *fleet.UploadSoftwareInstallerPayload) (uint, error) {
+		id := nextID
+		nextID++
+		cache = append([]fleet.FleetMaintainedVersion{{ID: id, Version: payload.Version, FirstSeenAt: now}}, cache...)
+		for len(cache) > 2 {
+			for i := len(cache) - 1; i >= 0; i-- {
+				if cache[i].ID != activeID && cache[i].ID != id {
+					cache = slices.Delete(cache, i, i+1)
+					break
+				}
+			}
+		}
+		return id, nil
+	}
+	ds.SetFleetMaintainedAppActiveInstallerFunc = func(ctx context.Context, payload *fleet.UpdateSoftwareInstallerPayload, id uint) error {
+		activeID = id
+		for _, v := range cache {
+			if v.ID == id {
+				require.GreaterOrEqual(t, now.Sub(v.FirstSeenAt), delay, "promoted %s before its delay elapsed", v.Version)
+			}
+		}
+		promoted[id] = now
+		return nil
+	}
+
+	store := memStore()
+	client := fleethttp.NewClient()
+	for day := range 15 {
+		now = start.Add(time.Duration(day) * 24 * time.Hour)
+		srv.mu.Lock()
+		srv.version = fmt.Sprintf("150.0.%d", day)
+		srv.mu.Unlock()
+
+		active := cache[slices.IndexFunc(cache, func(v fleet.FleetMaintainedVersion) bool { return v.ID == activeID })]
+		c := fleet.FMAAutoUpdateCandidate{
+			TeamID: new(uint(1)), TitleID: testFMATitleID, FleetMaintainedAppID: testFMAAppID,
+			InstallerID: active.ID, Version: active.Version, Slug: testFMASlug,
+		}
+		err := autoUpdateOneFleetMaintainedApp(context.Background(), ds, store, client, discardLogger(), c,
+			map[string]*manifestEntry{}, maintained_apps.NewUpdateDelayResolver(ds), now)
+		require.NoError(t, err)
+	}
+	require.GreaterOrEqual(t, len(promoted), 2, "fast releases must still be promoted")
 }

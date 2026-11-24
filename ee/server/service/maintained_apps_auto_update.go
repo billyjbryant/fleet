@@ -63,6 +63,7 @@ func AutoUpdateFleetMaintainedApps(ctx context.Context, ds fleet.Datastore, soft
 		client = fleethttp.NewClient(fleethttp.WithTimeout(timeout))
 	}
 	manifests := map[string]*manifestEntry{}
+	delays := maintained_apps.NewUpdateDelayResolver(ds)
 
 	for _, c := range candidates {
 		// Each app can take up to InstallerTimeout to download, so a run over many apps can outlast the
@@ -72,7 +73,7 @@ func AutoUpdateFleetMaintainedApps(ctx context.Context, ds fleet.Datastore, soft
 			return ctxerr.Wrap(ctx, err, "auto-updating fleet-maintained apps")
 		}
 
-		err = autoUpdateOneFleetMaintainedApp(ctx, ds, softwareInstallStore, client, logger, c, manifests)
+		err = autoUpdateOneFleetMaintainedApp(ctx, ds, softwareInstallStore, client, logger, c, manifests, delays, time.Now().UTC())
 		if err != nil {
 			logger.ErrorContext(ctx, "auto-updating fleet-maintained app",
 				"title_id", c.TitleID, "fleet_id", teamIDForLog(c.TeamID), "slug", c.Slug, "err", err)
@@ -91,6 +92,8 @@ func autoUpdateOneFleetMaintainedApp(
 	logger *slog.Logger,
 	c fleet.FMAAutoUpdateCandidate,
 	manifests map[string]*manifestEntry,
+	delays *maintained_apps.UpdateDelayResolver,
+	now time.Time,
 ) error {
 	pinned, err := ds.GetPinnedVersion(ctx, c.TeamID, c.TitleID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -107,11 +110,45 @@ func autoUpdateOneFleetMaintainedApp(
 		return nil
 	}
 
+	delayDays, _, err := delays.Resolve(ctx, c.TeamID, c.UpdateDelayDays)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "resolving update delay")
+	}
+	delay := maintained_apps.UpdateDelayDuration(delayDays)
+
+	// The cache holds two versions per app, so a download evicts every version but
+	// the active and the new one. Downloading while a version is waiting out its
+	// delay would evict it, and a fast-releasing app would never update. Hold
+	// downloads until it is promoted. A version that has just become eligible is
+	// promoted first so the download can't evict it either.
+	holdDownload := false
+	if delay > 0 && store != nil && client != nil {
+		cached, err := ds.GetFleetMaintainedVersionsByTitleID(ctx, c.TeamID, c.TitleID)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "getting cached versions")
+		}
+		if target, ok := selectAutoUpdateTarget(promotionCandidates(cached, c.InstallerID, delay), pin, delay, now); ok && target.ID != c.InstallerID {
+			if err := promoteFleetMaintainedApp(ctx, ds, logger, c, pin, "", delay, now); err != nil {
+				return err
+			}
+			c.InstallerID, c.Version = target.ID, target.Version
+			if cached, err = ds.GetFleetMaintainedVersionsByTitleID(ctx, c.TeamID, c.TitleID); err != nil {
+				return ctxerr.Wrap(ctx, err, "getting cached versions")
+			}
+		}
+		if pending, ok := maintained_apps.PendingVersion(cached, c.InstallerID, pin, delay, now); ok {
+			holdDownload = true
+			logger.InfoContext(ctx, "holding fleet-maintained app update",
+				"title_id", c.TitleID, "fleet_id", teamIDForLog(c.TeamID), "slug", c.Slug,
+				"pending_version", pending.Version, "eligible_at", pending.FirstSeenAt.Add(delay))
+		}
+	}
+
 	// Download the latest published version when the store is configured and the
 	// pin would actually promote to it. Download failures are isolated: we log and
 	// still try to promote among whatever is already cached.
 	var publishedVersion string
-	if store != nil && client != nil {
+	if store != nil && client != nil && !holdDownload {
 		version, err := downloadNewVersionIfEligible(ctx, ds, store, logger, c, pin, client, manifests)
 		if err != nil {
 			logger.ErrorContext(ctx, "downloading new fleet-maintained app version",
@@ -120,14 +157,14 @@ func autoUpdateOneFleetMaintainedApp(
 		publishedVersion = version
 	}
 
-	return promoteFleetMaintainedApp(ctx, ds, logger, c, pin, publishedVersion)
+	return promoteFleetMaintainedApp(ctx, ds, logger, c, pin, publishedVersion, delay, now)
 }
 
 // promoteFleetMaintainedApp advances the active installer to the newest cached
 // version the pin allows, without ever rewriting the pin (a nil PinnedVersion
 // leaves it untouched, so an admin pin changed between this read and write is
 // never clobbered).
-func promoteFleetMaintainedApp(ctx context.Context, ds fleet.Datastore, logger *slog.Logger, c fleet.FMAAutoUpdateCandidate, pin string, publishedVersion string) error {
+func promoteFleetMaintainedApp(ctx context.Context, ds fleet.Datastore, logger *slog.Logger, c fleet.FMAAutoUpdateCandidate, pin string, publishedVersion string, delay time.Duration, now time.Time) error {
 	// Cached versions, most recently downloaded first. This runs on every pass, not just
 	// after a download, so the first entry decides which version stays active.
 	versions, err := ds.GetFleetMaintainedVersionsByTitleID(ctx, c.TeamID, c.TitleID)
@@ -153,7 +190,7 @@ func promoteFleetMaintainedApp(ctx context.Context, ds fleet.Datastore, logger *
 		}
 	}
 
-	target, ok := selectAutoUpdateTarget(versions, pin)
+	target, ok := selectAutoUpdateTarget(promotionCandidates(versions, c.InstallerID, delay), pin, delay, now)
 	if !ok || target.ID == c.InstallerID {
 		// No newer eligible version, or already on it.
 		return nil
@@ -212,7 +249,7 @@ func downloadNewVersionIfEligible(
 	if !isLatest {
 		// Caret pin: caching a version the pin can never promote to wastes a slot.
 		// Empty pin always takes latest; literal pins were filtered out by the caller.
-		if pin != "" && !versionMatchesMajor(app.Version, strings.TrimPrefix(pin, "^")) {
+		if pin != "" && !maintained_apps.VersionMatchesMajor(app.Version, strings.TrimPrefix(pin, "^")) {
 			return "", nil
 		}
 		versionExists, cachedHash, err := ds.HasFMAInstallerVersion(ctx, c.TeamID, c.FleetMaintainedAppID, app.Version)
@@ -319,7 +356,7 @@ func downloadNewVersionIfEligible(
 	}
 
 	// Apply the deferred gates now that the concrete version is known ("latest").
-	if isLatest && pin != "" && !versionMatchesMajor(version, strings.TrimPrefix(pin, "^")) {
+	if isLatest && pin != "" && !maintained_apps.VersionMatchesMajor(version, strings.TrimPrefix(pin, "^")) {
 		return "", nil
 	}
 	if !versionAlreadyCached {
@@ -457,19 +494,33 @@ func hydrateLatestManifest(ctx context.Context, ds fleet.Datastore, c fleet.FMAA
 	return app, err
 }
 
+// promotionCandidates trims versions (newest first) to those at or before the
+// active one. A delay skips versions that aren't eligible yet, which could
+// otherwise land on one older than the active version.
+func promotionCandidates(versions []fleet.FleetMaintainedVersion, activeID uint, delay time.Duration) []fleet.FleetMaintainedVersion {
+	if delay <= 0 {
+		return versions
+	}
+	if i := slices.IndexFunc(versions, func(v fleet.FleetMaintainedVersion) bool { return v.ID == activeID }); i >= 0 {
+		return versions[:i+1]
+	}
+	return versions
+}
+
 // selectAutoUpdateTarget picks the cached version the pin allows the cron to
 // advance to. versions must be ordered most recently downloaded first. An empty
 // pin means Latest (newest). A caret pin returns the newest version within its major, or
 // ok=false when no cached version satisfies the major (so the cron skips rather
-// than crossing into another major, unlike the on-demand PATCH path).
-func selectAutoUpdateTarget(versions []fleet.FleetMaintainedVersion, pin string) (fleet.FleetMaintainedVersion, bool) {
-	if pin == "" {
-		return versions[0], true
-	}
+// than crossing into another major, unlike the on-demand PATCH path). Versions
+// that haven't been cached for at least delay as of now are skipped.
+func selectAutoUpdateTarget(versions []fleet.FleetMaintainedVersion, pin string, delay time.Duration, now time.Time) (fleet.FleetMaintainedVersion, bool) {
 	// Caret pin: parsePinnedVersion already validated the shape on write.
 	major := strings.TrimPrefix(pin, "^")
 	for _, v := range versions {
-		if versionMatchesMajor(v.Version, major) {
+		if pin != "" && !maintained_apps.VersionMatchesMajor(v.Version, major) {
+			continue
+		}
+		if maintained_apps.VersionEligible(v, delay, now) {
 			return v, true
 		}
 	}

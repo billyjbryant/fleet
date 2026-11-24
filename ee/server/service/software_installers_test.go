@@ -3345,6 +3345,7 @@ func TestSoftwareBatchUploadFMAVersionCache(t *testing.T) {
 			dev_mode.SetOverride("FLEET_DEV_MAINTAINED_APPS_FALLBACK_BASE_URL", manifestSrv.URL, t)
 
 			ds := new(mock.Store)
+			ds.AppConfigFunc = func(context.Context) (*fleet.AppConfig, error) { return &fleet.AppConfig{}, nil }
 			ds.TeamLiteFunc = func(ctx context.Context, tmID uint) (*fleet.TeamLite, error) {
 				return &fleet.TeamLite{ID: tmID}, nil
 			}
@@ -3554,40 +3555,6 @@ func TestGetBatchSetSoftwareInstallersResultMissingDeletedKey(t *testing.T) {
 	require.Empty(t, result.Packages)
 	require.Empty(t, result.DeletedPackages)
 	require.Empty(t, result.DownloadProgress)
-}
-
-func TestVersionMatchesMajor(t *testing.T) {
-	// Versions taken from ee/maintained-apps/outputs; most are not valid semver. The leading dot-segment is
-	// compared as a string, so a leading-zero or bare major stays distinct from "2"/"10"/"12".
-	cases := []struct {
-		version      string
-		majorVersion string
-		want         bool
-	}{
-		{"149.1.91.172", "149", true},
-		{"149.1.91.172", "150", false},
-		{"149.1.91.172", "14", false},
-		{"6.0.4.11438", "6", true},
-		{"25.0.208.0", "25", true},
-		{"221.0.0.0.0", "221", true},
-		{"0.2026.06.10.09.27.01", "0", true},
-		{"8.0.47.CE", "8", true},
-		{"2.2.18d", "2", true},
-		{"1.2.92.148.g882cc571", "1", true},
-		{"114.0.4-release.20250509.32955", "114", true},
-		{"2026.05.0+218", "2026", true},
-		{"02.07.01.62", "02", true},
-		{"02.07.01.62", "2", false},
-		{"20250302", "20250302", true},
-		{"183", "183", true},
-		{"149", "149", true},
-		{"1.21b", "1", true},
-		{"10.0.1", "1", false},
-		{"12.0", "1", false},
-	}
-	for _, c := range cases {
-		assert.Equalf(t, c.want, versionMatchesMajor(c.version, c.majorVersion), "version %q caret ^%s", c.version, c.majorVersion)
-	}
 }
 
 func TestParsePinnedVersion(t *testing.T) {
@@ -4445,6 +4412,7 @@ func TestSoftwareBatchUploadWindowsFMAKeepsManifestUninstallScript(t *testing.T)
 	ds.GetMaintainedAppBySlugFunc = func(ctx context.Context, slug string, teamID *uint) (*fleet.MaintainedApp, error) {
 		return &fleet.MaintainedApp{ID: 1, Name: "App", Platform: "windows", Slug: slug}, nil
 	}
+	ds.AppConfigFunc = func(context.Context) (*fleet.AppConfig, error) { return &fleet.AppConfig{}, nil }
 	ds.TeamLiteFunc = func(ctx context.Context, tmID uint) (*fleet.TeamLite, error) {
 		return &fleet.TeamLite{ID: tmID}, nil
 	}
@@ -4492,6 +4460,7 @@ type fmaRecoveryBatchOptions struct {
 	body                         []byte
 	dryRun, present, cached      bool
 	existsErr                    error
+	prepare                      func(*mock.Store)
 }
 
 type fmaRecoveryBatchResult struct {
@@ -4541,6 +4510,7 @@ func runFMARecoveryBatch(t *testing.T, opts fmaRecoveryBatchOptions) *fmaRecover
 	dev_mode.SetOverride("FLEET_DEV_MAINTAINED_APPS_BASE_URL", manifest.URL, t)
 	dev_mode.SetOverride("FLEET_DEV_MAINTAINED_APPS_FALLBACK_BASE_URL", manifest.URL, t)
 	ds := r.ds
+	ds.AppConfigFunc = func(context.Context) (*fleet.AppConfig, error) { return &fleet.AppConfig{}, nil }
 	ds.TeamLiteFunc = func(ctx context.Context, id uint) (*fleet.TeamLite, error) { return &fleet.TeamLite{ID: id}, nil }
 	ds.GetTeamsWithInstallerByHashFunc = func(context.Context, string, string) (map[uint][]*fleet.ExistingSoftwareInstaller, error) {
 		return nil, nil
@@ -4563,6 +4533,9 @@ func runFMARecoveryBatch(t *testing.T, opts fmaRecoveryBatchOptions) *fmaRecover
 	}
 	ds.BatchSetInHouseAppsInstallersFunc = func(context.Context, *uint, []*fleet.UploadSoftwareInstallerPayload) error { return nil }
 	ds.ReconcileWindowsMaintainedAppSoftwareTitlesFunc = func(context.Context) error { return nil }
+	if opts.prepare != nil {
+		opts.prepare(ds)
+	}
 	r.store = &mocksoftware.SoftwareInstallerStore{
 		ExistsFunc: func(context.Context, string) (bool, error) { return opts.present, opts.existsErr },
 		PutFunc: func(_ context.Context, id string, content io.ReadSeeker) error {
@@ -4601,6 +4574,20 @@ func TestSoftwareBatchUploadFMAMissingBytes(t *testing.T) {
 			require.Equal(t, "1.0", r.applied[0].Version)
 		})
 	}
+}
+
+func TestSoftwareBatchUploadFMAResolvesUpdateDelay(t *testing.T) {
+	r := runFMARecoveryBatch(t, fmaRecoveryBatchOptions{prepare: func(ds *mock.Store) {
+		ds.TeamLiteFunc = func(_ context.Context, id uint) (*fleet.TeamLite, error) {
+			team := &fleet.TeamLite{ID: id}
+			team.Config.FleetMaintainedAppSettings.UpdateDelayDays = optjson.SetInt(5)
+			return team, nil
+		}
+	}})
+	require.Equal(t, batchSetCompleted, r.status)
+	require.Len(t, r.applied, 1)
+	require.Nil(t, r.applied[0].FMAUpdateDelayDays)
+	require.EqualValues(t, 5, r.applied[0].FMAEffectiveUpdateDelayDays)
 }
 
 func TestSoftwareBatchUploadFMAHashMismatch(t *testing.T) {

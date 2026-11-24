@@ -698,6 +698,12 @@ type UploadSoftwareInstallerPayload struct {
 	// RollbackVersion is the version to pin as "active" for a fleet-maintained app.
 	// If empty, the latest version is used.
 	RollbackVersion string
+	// FMAUpdateDelayDays is the per-app update delay for a fleet-maintained app.
+	// nil clears it so the fleet or org setting applies.
+	FMAUpdateDelayDays *uint
+	// FMAEffectiveUpdateDelayDays is the delay resolved across the app, fleet,
+	// and org settings, set by the service before the batch apply.
+	FMAEffectiveUpdateDelayDays uint
 	// FMAVersionCached indicates this FMA version is already cached in the
 	// database and installer store, so storage and insert can be skipped.
 	FMAVersionCached   bool
