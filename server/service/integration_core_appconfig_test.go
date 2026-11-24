@@ -1926,6 +1926,13 @@ func (s *integrationTestSuite) TestAppConfig() {
 	errMsg = extractServerErrorText(res.Body)
 	assert.Contains(t, errMsg, "missing or invalid license")
 
+	// try to set the Fleet-maintained app update delay, which is premium only
+	res = s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{
+		"fleet_maintained_app_settings": {"update_delay_days": 7}
+  }`), http.StatusUnprocessableEntity)
+	errMsg = extractServerErrorText(res.Body)
+	assert.Contains(t, errMsg, "missing or invalid license")
+
 	// try to enable Windows MDM, impossible without the WSTEP certs
 	// (only set in mdm integrations tests)
 	res = s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{

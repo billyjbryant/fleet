@@ -244,6 +244,13 @@ func (svc *Service) ModifyTeam(ctx context.Context, teamID uint, payload fleet.T
 		nameTemplateUpdated             bool
 	)
 	var windowsManagedLocalAccountUpdated bool
+	if payload.FleetMaintainedAppSettings != nil && payload.FleetMaintainedAppSettings.UpdateDelayDays.Set {
+		if err := payload.FleetMaintainedAppSettings.Validate(); err != nil {
+			return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("fleet_maintained_app_settings.update_delay_days", err.Error()))
+		}
+		team.Config.FleetMaintainedAppSettings = *payload.FleetMaintainedAppSettings
+	}
+
 	if payload.MDM != nil {
 		if payload.MDM.MacOSUpdates != nil {
 			if err := payload.MDM.MacOSUpdates.Validate(); err != nil {
@@ -1663,6 +1670,11 @@ func (svc *Service) ApplyTeamSpecs(ctx context.Context, specs []*fleet.TeamSpec,
 		if err := spec.MDM.WindowsUpdates.Validate(); err != nil {
 			return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("windows_updates", err.Error()))
 		}
+		if spec.FleetMaintainedAppSettings != nil {
+			if err := spec.FleetMaintainedAppSettings.Validate(); err != nil {
+				return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("fleet_maintained_app_settings.update_delay_days", err.Error()))
+			}
+		}
 		if err := spec.MDM.MacOSSetup.Validate(); err != nil {
 			return nil, ctxerr.Wrap(ctx, err) // Error message coming from validate is already invalid argument
 		}
@@ -1983,6 +1995,9 @@ func (svc *Service) createTeamFromSpec(
 		},
 		Secrets: secrets,
 	}
+	if spec.FleetMaintainedAppSettings != nil {
+		newTeam.Config.FleetMaintainedAppSettings = *spec.FleetMaintainedAppSettings
+	}
 	tm, err := svc.ds.NewTeam(ctx, newTeam)
 	if err != nil {
 		return nil, err
@@ -2139,6 +2154,10 @@ func (svc *Service) editTeamFromSpec(
 		mdmWindowsUpdatesEdited = team.Config.MDM.WindowsUpdates.DeadlineDays.Value != spec.MDM.WindowsUpdates.DeadlineDays.Value ||
 			team.Config.MDM.WindowsUpdates.GracePeriodDays.Value != spec.MDM.WindowsUpdates.GracePeriodDays.Value
 		team.Config.MDM.WindowsUpdates = spec.MDM.WindowsUpdates
+	}
+
+	if spec.FleetMaintainedAppSettings != nil && spec.FleetMaintainedAppSettings.UpdateDelayDays.Set {
+		team.Config.FleetMaintainedAppSettings = *spec.FleetMaintainedAppSettings
 	}
 
 	if spec.MDM.WindowsUpdates.Configured() {
@@ -3038,6 +3057,13 @@ func (svc *Service) modifyDefaultTeamConfig(ctx context.Context, payload fleet.T
 			return nil, err
 		}
 		applyTeamWebhookSettings(&config.WebhookSettings, payload.WebhookSettings)
+	}
+
+	if payload.FleetMaintainedAppSettings != nil && payload.FleetMaintainedAppSettings.UpdateDelayDays.Set {
+		if err := payload.FleetMaintainedAppSettings.Validate(); err != nil {
+			return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("fleet_maintained_app_settings.update_delay_days", err.Error()))
+		}
+		config.FleetMaintainedAppSettings = *payload.FleetMaintainedAppSettings
 	}
 
 	// Apply integrations if provided

@@ -2971,3 +2971,125 @@ func (s *integrationEnterpriseTestSuite) TestTeamHostNameTemplate() {
 	s.lastActivityOfTypeMatches(activityName,
 		fmt.Sprintf(`{"fleet_id": %d, "fleet_name": %q, "name_template": %q}`, newTeam.ID, newTeam.Name, tmpl), 0)
 }
+
+func (s *integrationEnterpriseTestSuite) TestFleetMaintainedAppSettingsAPI() {
+	t := s.T()
+	ctx := t.Context()
+
+	t.Cleanup(func() {
+		s.DoJSON("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":null}}`), http.StatusOK, &appConfigResponse{})
+	})
+
+	// org level
+	var acResp appConfigResponse
+	s.DoJSON("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":7}}`), http.StatusOK, &acResp)
+	require.Equal(t, optjson.SetInt(7).Value, acResp.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+	require.True(t, acResp.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	// omitting the key preserves the stored value
+	s.DoJSON("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"org_info":{"org_name":"fma-delay-org"}}`), http.StatusOK, &acResp)
+	require.True(t, acResp.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+	require.Equal(t, 7, acResp.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	for _, bad := range []string{"-1", "366"} {
+		res := s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":`+bad+`}}`), http.StatusUnprocessableEntity)
+		require.Contains(t, extractServerErrorText(res.Body), "update_delay_days")
+	}
+	appCfg, err := s.ds.AppConfig(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 7, appCfg.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// explicit null clears
+	s.DoJSON("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":null}}`), http.StatusOK, &acResp)
+	require.False(t, acResp.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	// fleet level via PATCH
+	team, err := s.ds.NewTeam(ctx, &fleet.Team{Name: t.Name() + "-patch"})
+	require.NoError(t, err)
+	var tmResp teamResponse
+	s.DoJSON("PATCH", fmt.Sprintf("/api/latest/fleet/fleets/%d", team.ID), json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":3}}`), http.StatusOK, &tmResp)
+	got, err := s.ds.TeamWithExtras(ctx, team.ID)
+	require.NoError(t, err)
+	require.True(t, got.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+	require.Equal(t, 3, got.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// omitting the key preserves it
+	s.DoJSON("PATCH", fmt.Sprintf("/api/latest/fleet/fleets/%d", team.ID), json.RawMessage(`{"description":"changed"}`), http.StatusOK, &tmResp)
+	got, err = s.ds.TeamWithExtras(ctx, team.ID)
+	require.NoError(t, err)
+	require.Equal(t, 3, got.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	for _, bad := range []string{"-1", "366"} {
+		res := s.Do("PATCH", fmt.Sprintf("/api/latest/fleet/fleets/%d", team.ID), json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":`+bad+`}}`), http.StatusUnprocessableEntity)
+		require.Contains(t, extractServerErrorText(res.Body), "update_delay_days")
+	}
+	got, err = s.ds.TeamWithExtras(ctx, team.ID)
+	require.NoError(t, err)
+	require.Equal(t, 3, got.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// null clears back to inherit
+	s.DoJSON("PATCH", fmt.Sprintf("/api/latest/fleet/fleets/%d", team.ID), json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":null}}`), http.StatusOK, &tmResp)
+	got, err = s.ds.TeamWithExtras(ctx, team.ID)
+	require.NoError(t, err)
+	require.False(t, got.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	// unassigned
+	s.DoJSON("PATCH", "/api/latest/fleet/fleets/0", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":5}}`), http.StatusOK, &tmResp)
+	defCfg, err := s.ds.DefaultTeamConfig(ctx)
+	require.NoError(t, err)
+	require.True(t, defCfg.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+	require.Equal(t, 5, defCfg.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+	for _, bad := range []string{"-1", "366"} {
+		res := s.Do("PATCH", "/api/latest/fleet/fleets/0", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":`+bad+`}}`), http.StatusUnprocessableEntity)
+		require.Contains(t, extractServerErrorText(res.Body), "update_delay_days")
+	}
+	defCfg, err = s.ds.DefaultTeamConfig(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 5, defCfg.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+	s.DoJSON("PATCH", "/api/latest/fleet/fleets/0", json.RawMessage(`{"fleet_maintained_app_settings":{"update_delay_days":null}}`), http.StatusOK, &tmResp)
+	defCfg, err = s.ds.DefaultTeamConfig(ctx)
+	require.NoError(t, err)
+	require.False(t, defCfg.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	// team specs: create, edit, omit, invalid on both create and edit
+	specName := t.Name() + "-spec"
+	specs := func(days any) map[string]any {
+		return map[string]any{"specs": []any{map[string]any{
+			"name":                          specName,
+			"fleet_maintained_app_settings": map[string]any{"update_delay_days": days},
+		}}}
+	}
+	res := s.Do("POST", "/api/latest/fleet/spec/fleets", specs(-1), http.StatusUnprocessableEntity)
+	require.Contains(t, extractServerErrorText(res.Body), "update_delay_days")
+	_, err = s.ds.TeamByName(ctx, specName)
+	require.Error(t, err)
+
+	var applyResp applyTeamSpecsResponse
+	s.DoJSON("POST", "/api/latest/fleet/spec/fleets", specs(9), http.StatusOK, &applyResp)
+	specTeam, err := s.ds.TeamByName(ctx, specName)
+	require.NoError(t, err)
+	require.Equal(t, 9, specTeam.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	s.DoJSON("POST", "/api/latest/fleet/spec/fleets", specs(11), http.StatusOK, &applyResp)
+	specTeam, err = s.ds.TeamByName(ctx, specName)
+	require.NoError(t, err)
+	require.Equal(t, 11, specTeam.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	res = s.Do("POST", "/api/latest/fleet/spec/fleets", specs(-1), http.StatusUnprocessableEntity)
+	require.Contains(t, extractServerErrorText(res.Body), "update_delay_days")
+	specTeam, err = s.ds.TeamByName(ctx, specName)
+	require.NoError(t, err)
+	require.Equal(t, 11, specTeam.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// omitted key leaves the stored value untouched
+	s.DoJSON("POST", "/api/latest/fleet/spec/fleets", map[string]any{"specs": []any{map[string]any{"name": specName}}}, http.StatusOK, &applyResp)
+	specTeam, err = s.ds.TeamByName(ctx, specName)
+	require.NoError(t, err)
+	require.Equal(t, 11, specTeam.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// explicit null clears
+	s.DoJSON("POST", "/api/latest/fleet/spec/fleets", specs(nil), http.StatusOK, &applyResp)
+	specTeam, err = s.ds.TeamByName(ctx, specName)
+	require.NoError(t, err)
+	require.False(t, specTeam.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+}
