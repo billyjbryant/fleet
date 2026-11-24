@@ -87,6 +87,9 @@ func TestSoftwareInstallers(t *testing.T) {
 		{"CustomToFMAInstallerReplacement", testCustomToFMAInstallerReplacement},
 		{"GetInstallerByTeamAndURL", testGetInstallerByTeamAndURL},
 		{"BatchSetFMACancelsPendingOnActiveRow", testBatchSetFMACancelsPendingOnActiveRow},
+		{"BatchSetFMARespectsUpdateDelay", testBatchSetFMARespectsUpdateDelay},
+		{"BatchSetFMAUpdateDelayDoesNotStarve", testBatchSetFMAUpdateDelayDoesNotStarve},
+		{"BatchSetFMAUpdateDelayRow", testBatchSetFMAUpdateDelayRow},
 		{"SoftwareInstallerTitleIDValidation", testSoftwareInstallerTitleIDValidation},
 		{"MatchOrCreateSoftwareInstallerDuplicateConflicts", testMatchOrCreateSoftwareInstallerDuplicateConflicts},
 		{"SetHostSoftwareInstallResultResolvesOrphanedActivity", testSetHostSoftwareInstallResultResolvesOrphanedActivity},
@@ -10228,4 +10231,215 @@ func testFMAActiveInstallerCandidates(t *testing.T, ds *Datastore) {
 	_, err = ds.GetFleetMaintainedAppActiveInstaller(ctx, &team.ID, customTitleID)
 	require.Error(t, err)
 	require.True(t, fleet.IsNotFound(err))
+}
+
+// fmaDelayFixture applies FMA payloads for one team and reads back the cached versions.
+type fmaDelayFixture struct {
+	t    *testing.T
+	ds   *Datastore
+	team *fleet.Team
+	user *fleet.User
+	fma  *fleet.MaintainedApp
+}
+
+func newFMADelayFixture(t *testing.T, ds *Datastore) *fmaDelayFixture {
+	ctx := t.Context()
+	user := test.NewUser(t, ds, "Alice", t.Name()+"@example.com", true)
+	team, err := ds.NewTeam(ctx, &fleet.Team{Name: t.Name()})
+	require.NoError(t, err)
+	fma, err := ds.UpsertMaintainedApp(ctx, &fleet.MaintainedApp{
+		Name:             "delay_app",
+		Slug:             "delay_app/darwin",
+		Platform:         "darwin",
+		UniqueIdentifier: "com.example.delay_app",
+	})
+	require.NoError(t, err)
+	return &fmaDelayFixture{t: t, ds: ds, team: team, user: user, fma: fma}
+}
+
+func (f *fmaDelayFixture) payload(version string, effectiveDelay uint) *fleet.UploadSoftwareInstallerPayload {
+	return &fleet.UploadSoftwareInstallerPayload{
+		FleetMaintainedAppID:        &f.fma.ID,
+		Title:                       "delay_app",
+		BundleIdentifier:            "com.example.delay_app",
+		Source:                      "apps",
+		Platform:                    "darwin",
+		InstallScript:               "echo install",
+		UninstallScript:             "echo uninstall",
+		StorageID:                   "storage_" + version,
+		Filename:                    "delay_app.pkg",
+		Extension:                   "pkg",
+		Version:                     version,
+		UserID:                      f.user.ID,
+		ValidatedLabels:             &fleet.LabelIdentsWithScope{},
+		TeamID:                      &f.team.ID,
+		FMAEffectiveUpdateDelayDays: effectiveDelay,
+	}
+}
+
+func (f *fmaDelayFixture) apply(p *fleet.UploadSoftwareInstallerPayload) {
+	f.t.Helper()
+	_, err := f.ds.BatchSetSoftwareInstallers(f.t.Context(), &f.team.ID, []*fleet.UploadSoftwareInstallerPayload{p})
+	require.NoError(f.t, err)
+}
+
+type fmaDelayRow struct {
+	ID       uint   `db:"id"`
+	Version  string `db:"version"`
+	IsActive bool   `db:"is_active"`
+	TitleID  uint   `db:"title_id"`
+	Waited   bool   `db:"waited"`
+}
+
+// rows returns the cached versions; waited reports whether each has been cached for days.
+func (f *fmaDelayFixture) rows(days uint) []fmaDelayRow {
+	var rows []fmaDelayRow
+	ExecAdhocSQL(f.t, f.ds, func(q sqlx.ExtContext) error {
+		return sqlx.SelectContext(f.t.Context(), q, &rows, `
+			SELECT id, version, is_active, title_id, first_seen_at <= NOW(6) - INTERVAL ? DAY AS waited
+			FROM software_installers WHERE global_or_team_id = ? AND fleet_maintained_app_id IS NOT NULL
+			ORDER BY uploaded_at DESC, id DESC`, days, f.team.ID)
+	})
+	return rows
+}
+
+func (f *fmaDelayFixture) active() fmaDelayRow {
+	f.t.Helper()
+	var active []fmaDelayRow
+	for _, r := range f.rows(0) {
+		if r.IsActive {
+			active = append(active, r)
+		}
+	}
+	require.Len(f.t, active, 1)
+	return active[0]
+}
+
+func (f *fmaDelayFixture) versions() []string {
+	var versions []string
+	for _, r := range f.rows(0) {
+		versions = append(versions, r.Version)
+	}
+	return versions
+}
+
+func (f *fmaDelayFixture) ageFirstSeen(days int, versions ...string) {
+	ExecAdhocSQL(f.t, f.ds, func(q sqlx.ExtContext) error {
+		stmt, args, err := sqlx.In(`UPDATE software_installers SET first_seen_at = first_seen_at - INTERVAL ? DAY
+			WHERE global_or_team_id = ? AND fleet_maintained_app_id IS NOT NULL AND version IN (?)`, days, f.team.ID, versions)
+		if err != nil {
+			return err
+		}
+		_, err = q.ExecContext(f.t.Context(), stmt, args...)
+		return err
+	})
+}
+
+func testBatchSetFMARespectsUpdateDelay(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	f := newFMADelayFixture(t, ds)
+	host := test.NewHost(t, ds, "host_fma_delay", "1", "hostkey_fma_delay", "hostuuid_fma_delay", time.Now())
+
+	// The first install isn't delayed.
+	f.apply(f.payload("1.0", 7))
+	v1 := f.active()
+	require.Equal(t, "1.0", v1.Version)
+
+	_, err := ds.InsertSoftwareInstallRequest(ctx, host.ID, v1.ID, fleet.HostSoftwareInstallOptions{})
+	require.NoError(t, err)
+
+	// A new version waits; the held row's queued install is left alone.
+	f.apply(f.payload("2.0", 7))
+	require.Equal(t, v1.ID, f.active().ID)
+	require.Equal(t, []string{"2.0", "1.0"}, f.versions())
+	var pending int
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q, &pending, `SELECT COUNT(*) FROM software_install_upcoming_activities WHERE software_installer_id = ?`, v1.ID)
+	})
+	require.Equal(t, 1, pending)
+
+	// Re-applying before the delay elapses still holds.
+	f.apply(f.payload("2.0", 7))
+	require.Equal(t, v1.ID, f.active().ID)
+
+	f.ageFirstSeen(8, "2.0")
+	f.apply(f.payload("2.0", 7))
+	require.Equal(t, "2.0", f.active().Version)
+
+	// No delay activates the newest version immediately.
+	f.apply(f.payload("3.0", 0))
+	require.Equal(t, "3.0", f.active().Version)
+	require.Equal(t, []string{"3.0", "2.0"}, f.versions())
+
+	// A literal pin activates its version immediately, even one still waiting.
+	f.apply(f.payload("4.0", 7))
+	require.Equal(t, "3.0", f.active().Version)
+	pinned := f.payload("4.0", 7)
+	pinned.RollbackVersion = "4.0"
+	f.apply(pinned)
+	require.Equal(t, "4.0", f.active().Version)
+
+	// A caret pin the held version no longer satisfies activates the newest.
+	f.apply(f.payload("5.0", 7))
+	require.Equal(t, "4.0", f.active().Version)
+	caret := f.payload("5.1", 7)
+	caret.RollbackVersion = "^5"
+	f.apply(caret)
+	require.Equal(t, "5.1", f.active().Version)
+}
+
+func testBatchSetFMAUpdateDelayDoesNotStarve(t *testing.T, ds *Datastore) {
+	const delay = 7
+	f := newFMADelayFixture(t, ds)
+
+	var promotions int
+	var activeID uint
+	for day := 0; day <= 15; day++ {
+		if day > 0 {
+			f.ageFirstSeen(1, f.versions()...)
+		}
+		f.apply(f.payload(fmt.Sprintf("1.%d", day), delay))
+
+		rows := f.rows(delay)
+		require.LessOrEqual(t, len(rows), maxCachedFMAVersions, "day %d", day)
+		active := f.active()
+		if day > 0 && active.ID != activeID {
+			promotions++
+			for _, r := range rows {
+				if r.ID == active.ID {
+					require.True(t, r.Waited, "day %d: version %s promoted before waiting %d days", day, r.Version, delay)
+				}
+			}
+		}
+		activeID = active.ID
+	}
+	require.GreaterOrEqual(t, promotions, 2)
+}
+
+func testBatchSetFMAUpdateDelayRow(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	f := newFMADelayFixture(t, ds)
+
+	p := f.payload("1.0", 3)
+	p.FMAUpdateDelayDays = new(uint(3))
+	f.apply(p)
+	titleID := f.active().TitleID
+	got, err := ds.GetFMAUpdateDelay(ctx, &f.team.ID, titleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.EqualValues(t, 3, *got)
+
+	// An otherwise unchanged payload still updates the delay.
+	p = f.payload("1.0", 5)
+	p.FMAUpdateDelayDays = new(uint(5))
+	f.apply(p)
+	got, err = ds.GetFMAUpdateDelay(ctx, &f.team.ID, titleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.EqualValues(t, 5, *got)
+
+	f.apply(f.payload("1.0", 0))
+	got, err = ds.GetFMAUpdateDelay(ctx, &f.team.ID, titleID)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }

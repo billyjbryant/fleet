@@ -16,6 +16,7 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxdb"
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	maintained_apps "github.com/fleetdm/fleet/v4/server/mdm/maintainedapps"
 	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -3752,6 +3753,15 @@ WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NULL
 				pinnedToLiteralVersion = true
 			}
 
+			// Read before the upsert, which clears is_active on the row it writes.
+			var delayedPrevActiveID uint
+			if installer.FleetMaintainedAppID != nil && installer.FMAEffectiveUpdateDelayDays > 0 && !pinnedToLiteralVersion {
+				delayedPrevActiveID, err = loadDelayedFMAPreviousActive(ctx, tx, globalOrTeamID, titleID, installer.RollbackVersion)
+				if err != nil {
+					return ctxerr.Wrapf(ctx, err, "load active FMA installer for %q", installer.Filename)
+				}
+			}
+
 			if skipInsert {
 				// some fields still need to be updated
 				args := []any{
@@ -3830,18 +3840,37 @@ WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NULL
 					activeInstallerID = pinnedID
 				}
 
-				// Evict old FMA versions beyond the max per title per team.
-				// Always keep the active installer; fill remaining slots with
-				// the most recent versions, evict everything else.
 				fmaVersions, err := ds.getFleetMaintainedVersionsByTitleIDs(ctx, tx, []uint{titleID}, globalOrTeamID)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "list FMA installer versions for eviction for %q", installer.Filename)
 				}
 				versions := fmaVersions[titleID]
 
+				// With an update delay, a version is promoted only once it has waited the delay, and the
+				// longest-waiting pending version is kept over newer downloads so its wait isn't restarted.
+				var pendingInstallerID uint
+				if delayedPrevActiveID != 0 {
+					var eligibleIDs []uint
+					if err := sqlx.SelectContext(ctx, tx, &eligibleIDs, `
+						SELECT id FROM software_installers
+						WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NOT NULL
+							AND first_seen_at <= NOW(6) - INTERVAL ? DAY
+					`, globalOrTeamID, titleID, installer.FMAEffectiveUpdateDelayDays); err != nil {
+						return ctxerr.Wrapf(ctx, err, "list FMA versions past update delay for %q", installer.Filename)
+					}
+					activeInstallerID, pendingInstallerID = pickDelayedFMAVersions(
+						versions, delayedPrevActiveID, strings.TrimPrefix(installer.RollbackVersion, "^"), eligibleIDs)
+				}
+				heldPrevActive := delayedPrevActiveID != 0 && activeInstallerID == delayedPrevActiveID && installerID != delayedPrevActiveID
+
+				// Evict old FMA versions beyond the max per title per team.
+				// Always keep the active installer (and the pending one, if any); fill
+				// remaining slots with the most recent versions, evict everything else.
 				if len(versions) > maxCachedFMAVersions {
-					// Build the keep set: active installer + most recent up to max.
 					keepSet := map[uint]bool{activeInstallerID: true}
+					if pendingInstallerID != 0 {
+						keepSet[pendingInstallerID] = true
+					}
 					for _, v := range versions {
 						if len(keepSet) >= maxCachedFMAVersions {
 							break
@@ -3875,6 +3904,9 @@ WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NULL
 							installerIDsToDelete = append(installerIDsToDelete, v.ID)
 						}
 					}
+					if !keepSet[installerID] {
+						keptInstallerIDs = slices.DeleteFunc(keptInstallerIDs, func(id uint) bool { return id == installerID })
+					}
 				}
 
 				// Update the active installer and set all others to inactive
@@ -3893,6 +3925,18 @@ WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NULL
 					}
 				} else if err := deletePinnedVersionDB(ctx, tx, globalOrTeamID, titleID); err != nil {
 					return ctxerr.Wrapf(ctx, err, "clearing pin for %q", installer.Filename)
+				}
+				if installer.FMAUpdateDelayDays != nil {
+					if err := setFMAUpdateDelayDB(ctx, tx, globalOrTeamID, titleID, *installer.FMAUpdateDelayDays); err != nil {
+						return ctxerr.Wrapf(ctx, err, "setting update delay for %q", installer.Filename)
+					}
+				} else if err := deleteFMAUpdateDelayDB(ctx, tx, globalOrTeamID, titleID); err != nil {
+					return ctxerr.Wrapf(ctx, err, "clearing update delay for %q", installer.Filename)
+				}
+
+				// The held active row wasn't rewritten, so its queued installs stay.
+				if heldPrevActive {
+					existing = nil
 				}
 
 				// Re-point this title's policies to the active FMA installer.
@@ -4370,6 +4414,7 @@ FOR SHARE OF si`
 			Versions int    `db:"versions"`
 			Others   int    `db:"others"`
 			Policies int    `db:"policies"`
+			Delay    *uint  `db:"delay"`
 		}
 		if err := sqlx.GetContext(ctx, tx, &state, `
 SELECT
@@ -4378,12 +4423,14 @@ SELECT
 	(SELECT COUNT(*) FROM software_installers WHERE global_or_team_id = ? AND id != ?
 		AND ((title_id = ? AND (is_active = 1 OR fleet_maintained_app_id IS NULL)) OR (fleet_maintained_app_id = ? AND is_active = 1))) others,
 	(SELECT COUNT(*) FROM policies p JOIN software_installers si ON si.id = p.software_installer_id
-		WHERE si.global_or_team_id = ? AND si.title_id = ? AND si.id != ?) policies`,
+		WHERE si.global_or_team_id = ? AND si.title_id = ? AND si.id != ?) policies,
+	(SELECT update_delay_days FROM software_title_team_update_delays WHERE team_id = ? AND title_id = ?) delay`,
 			globalOrTeamID, titleID, globalOrTeamID, titleID, globalOrTeamID, id, titleID, *p.FleetMaintainedAppID,
-			globalOrTeamID, titleID, id); err != nil {
+			globalOrTeamID, titleID, id, globalOrTeamID, titleID); err != nil {
 			return 0, ctxerr.Wrap(ctx, err, "load FMA state")
 		}
-		if state.Pin != p.RollbackVersion || state.Versions > maxCachedFMAVersions || state.Others > 0 || state.Policies > 0 {
+		if state.Pin != p.RollbackVersion || !ptr.Equal(state.Delay, p.FMAUpdateDelayDays) ||
+			state.Versions > maxCachedFMAVersions || state.Others > 0 || state.Policies > 0 {
 			return 0, nil
 		}
 	}
@@ -5432,6 +5479,66 @@ func setFMAUpdateDelayDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID
 		ON DUPLICATE KEY UPDATE update_delay_days = VALUES(update_delay_days)
 	`, globalOrTeamID, titleID, days)
 	return err
+}
+
+// loadDelayedFMAPreviousActive returns the FMA installer active for the title
+// before this apply, or 0 when there is none or it no longer satisfies a caret
+// pin, in which case the newest version is activated without a delay.
+func loadDelayedFMAPreviousActive(ctx context.Context, tx sqlx.QueryerContext, globalOrTeamID, titleID uint, pin string) (uint, error) {
+	var prev struct {
+		ID      uint   `db:"id"`
+		Version string `db:"version"`
+	}
+	err := sqlx.GetContext(ctx, tx, &prev, `
+		SELECT id, version FROM software_installers
+		WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NOT NULL AND is_active = 1
+		LIMIT 1
+	`, globalOrTeamID, titleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if major, ok := strings.CutPrefix(pin, "^"); ok && !maintained_apps.VersionMatchesMajor(prev.Version, major) {
+		return 0, nil
+	}
+	return prev.ID, nil
+}
+
+// pickDelayedFMAVersions chooses the installer to activate under an update
+// delay and the pending one to keep cached. versions are ordered newest first.
+// The active one is the newest eligible version matching major (when set) that
+// isn't older than prevActiveID, else prevActiveID. The pending one is the
+// longest-waiting matching version newer than the active one, or 0.
+func pickDelayedFMAVersions(versions []fleet.FleetMaintainedVersion, prevActiveID uint, major string, eligibleIDs []uint) (activeID, pendingID uint) {
+	newerThan := func(id uint) []fleet.FleetMaintainedVersion {
+		for i, v := range versions {
+			if v.ID == id {
+				return versions[:i]
+			}
+		}
+		return nil
+	}
+	matches := func(v fleet.FleetMaintainedVersion) bool {
+		return major == "" || maintained_apps.VersionMatchesMajor(v.Version, major)
+	}
+
+	activeID = prevActiveID
+	for _, v := range newerThan(prevActiveID) {
+		if matches(v) && slices.Contains(eligibleIDs, v.ID) {
+			activeID = v.ID
+			break
+		}
+	}
+
+	var pendingSeen time.Time
+	for _, v := range newerThan(activeID) {
+		if matches(v) && (pendingID == 0 || !v.FirstSeenAt.After(pendingSeen)) {
+			pendingID, pendingSeen = v.ID, v.FirstSeenAt
+		}
+	}
+	return activeID, pendingID
 }
 
 func deleteFMAUpdateDelayDB(ctx context.Context, ex sqlx.ExtContext, globalOrTeamID uint, titleID uint) error {

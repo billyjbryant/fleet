@@ -4256,6 +4256,21 @@ func (svc *Service) softwareBatchUpload(
 		return
 	}
 
+	delays := maintained_apps.NewUpdateDelayResolver(svc.ds)
+	for _, payloadWithExtras := range installers {
+		for _, p := range append([]*fleet.UploadSoftwareInstallerPayload{payloadWithExtras.UploadSoftwareInstallerPayload}, payloadWithExtras.ExtraInstallers...) {
+			if p.FleetMaintainedAppID == nil {
+				continue
+			}
+			days, _, err := delays.Resolve(ctx, teamID, p.FMAUpdateDelayDays)
+			if err != nil {
+				batchErr = fmt.Errorf("resolving update delay for %q: %w", p.Filename, err)
+				return
+			}
+			p.FMAEffectiveUpdateDelayDays = days
+		}
+	}
+
 	var inHouseInstallers, softwareInstallers []*fleet.UploadSoftwareInstallerPayload
 	for _, payloadWithExtras := range installers {
 		payload := payloadWithExtras.UploadSoftwareInstallerPayload
