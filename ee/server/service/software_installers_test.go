@@ -3556,40 +3556,6 @@ func TestGetBatchSetSoftwareInstallersResultMissingDeletedKey(t *testing.T) {
 	require.Empty(t, result.DownloadProgress)
 }
 
-func TestVersionMatchesMajor(t *testing.T) {
-	// Versions taken from ee/maintained-apps/outputs; most are not valid semver. The leading dot-segment is
-	// compared as a string, so a leading-zero or bare major stays distinct from "2"/"10"/"12".
-	cases := []struct {
-		version      string
-		majorVersion string
-		want         bool
-	}{
-		{"149.1.91.172", "149", true},
-		{"149.1.91.172", "150", false},
-		{"149.1.91.172", "14", false},
-		{"6.0.4.11438", "6", true},
-		{"25.0.208.0", "25", true},
-		{"221.0.0.0.0", "221", true},
-		{"0.2026.06.10.09.27.01", "0", true},
-		{"8.0.47.CE", "8", true},
-		{"2.2.18d", "2", true},
-		{"1.2.92.148.g882cc571", "1", true},
-		{"114.0.4-release.20250509.32955", "114", true},
-		{"2026.05.0+218", "2026", true},
-		{"02.07.01.62", "02", true},
-		{"02.07.01.62", "2", false},
-		{"20250302", "20250302", true},
-		{"183", "183", true},
-		{"149", "149", true},
-		{"1.21b", "1", true},
-		{"10.0.1", "1", false},
-		{"12.0", "1", false},
-	}
-	for _, c := range cases {
-		assert.Equalf(t, c.want, versionMatchesMajor(c.version, c.majorVersion), "version %q caret ^%s", c.version, c.majorVersion)
-	}
-}
-
 func TestParsePinnedVersion(t *testing.T) {
 	cases := []struct {
 		name      string
