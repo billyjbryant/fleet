@@ -389,6 +389,7 @@ func (ds *Datastore) mergeWindowsFMATitle(ctx context.Context, destinationID uin
 			{"display names", `UPDATE IGNORE software_title_display_names SET software_title_id = ? WHERE software_title_id IN (?)`},
 			{"icons", `UPDATE IGNORE software_title_icons SET software_title_id = ? WHERE software_title_id IN (?)`},
 			{"team pins", `UPDATE IGNORE software_title_team_pins SET title_id = ? WHERE title_id IN (?)`},
+			{"update delays", `UPDATE IGNORE software_title_team_update_delays SET title_id = ? WHERE title_id IN (?)`},
 		}
 		for _, r := range repoint {
 			stmt, repointArgs, err := sqlx.In(r.stmt, destinationID, staleIDs)

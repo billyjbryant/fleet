@@ -1862,6 +1862,8 @@ type MarkFleetMaintainedAppVersionCurrentFunc func(ctx context.Context, installe
 
 type ListFleetMaintainedAppActiveInstallersFunc func(ctx context.Context) ([]fleet.FMAAutoUpdateCandidate, error)
 
+type GetFleetMaintainedAppActiveInstallerFunc func(ctx context.Context, teamID *uint, titleID uint) (*fleet.FMAAutoUpdateCandidate, error)
+
 type GetSoftwareInstallerMetadataByStorageIDFunc func(ctx context.Context, storageID string) (fleet.CachedInstallerMetadata, error)
 
 type InsertFleetMaintainedAppVersionFunc func(ctx context.Context, activeInstallerID uint, payload *fleet.UploadSoftwareInstallerPayload) (installerID uint, err error)
@@ -1873,6 +1875,12 @@ type ResolveActiveInstallerForRetryFunc func(ctx context.Context, installerID ui
 type GetPinnedVersionFunc func(ctx context.Context, teamID *uint, titleID uint) (*string, error)
 
 type DeletePinnedVersionFunc func(ctx context.Context, teamID *uint, titleID uint) error
+
+type GetFMAUpdateDelayFunc func(ctx context.Context, teamID *uint, titleID uint) (*uint, error)
+
+type SetFMAUpdateDelayFunc func(ctx context.Context, teamID *uint, titleID uint, days uint) error
+
+type DeleteFMAUpdateDelayFunc func(ctx context.Context, teamID *uint, titleID uint) error
 
 type HasFMAInstallerVersionFunc func(ctx context.Context, teamID *uint, fmaID uint, version string) (versionExists bool, storageID string, err error)
 
@@ -5416,6 +5424,9 @@ type DataStore struct {
 	ListFleetMaintainedAppActiveInstallersFunc        ListFleetMaintainedAppActiveInstallersFunc
 	ListFleetMaintainedAppActiveInstallersFuncInvoked bool
 
+	GetFleetMaintainedAppActiveInstallerFunc        GetFleetMaintainedAppActiveInstallerFunc
+	GetFleetMaintainedAppActiveInstallerFuncInvoked bool
+
 	GetSoftwareInstallerMetadataByStorageIDFunc        GetSoftwareInstallerMetadataByStorageIDFunc
 	GetSoftwareInstallerMetadataByStorageIDFuncInvoked bool
 
@@ -5433,6 +5444,15 @@ type DataStore struct {
 
 	DeletePinnedVersionFunc        DeletePinnedVersionFunc
 	DeletePinnedVersionFuncInvoked bool
+
+	GetFMAUpdateDelayFunc        GetFMAUpdateDelayFunc
+	GetFMAUpdateDelayFuncInvoked bool
+
+	SetFMAUpdateDelayFunc        SetFMAUpdateDelayFunc
+	SetFMAUpdateDelayFuncInvoked bool
+
+	DeleteFMAUpdateDelayFunc        DeleteFMAUpdateDelayFunc
+	DeleteFMAUpdateDelayFuncInvoked bool
 
 	HasFMAInstallerVersionFunc        HasFMAInstallerVersionFunc
 	HasFMAInstallerVersionFuncInvoked bool
@@ -13046,6 +13066,13 @@ func (s *DataStore) ListFleetMaintainedAppActiveInstallers(ctx context.Context) 
 	return s.ListFleetMaintainedAppActiveInstallersFunc(ctx)
 }
 
+func (s *DataStore) GetFleetMaintainedAppActiveInstaller(ctx context.Context, teamID *uint, titleID uint) (*fleet.FMAAutoUpdateCandidate, error) {
+	s.mu.Lock()
+	s.GetFleetMaintainedAppActiveInstallerFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetFleetMaintainedAppActiveInstallerFunc(ctx, teamID, titleID)
+}
+
 func (s *DataStore) GetSoftwareInstallerMetadataByStorageID(ctx context.Context, storageID string) (fleet.CachedInstallerMetadata, error) {
 	s.mu.Lock()
 	s.GetSoftwareInstallerMetadataByStorageIDFuncInvoked = true
@@ -13086,6 +13113,27 @@ func (s *DataStore) DeletePinnedVersion(ctx context.Context, teamID *uint, title
 	s.DeletePinnedVersionFuncInvoked = true
 	s.mu.Unlock()
 	return s.DeletePinnedVersionFunc(ctx, teamID, titleID)
+}
+
+func (s *DataStore) GetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) (*uint, error) {
+	s.mu.Lock()
+	s.GetFMAUpdateDelayFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetFMAUpdateDelayFunc(ctx, teamID, titleID)
+}
+
+func (s *DataStore) SetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint, days uint) error {
+	s.mu.Lock()
+	s.SetFMAUpdateDelayFuncInvoked = true
+	s.mu.Unlock()
+	return s.SetFMAUpdateDelayFunc(ctx, teamID, titleID, days)
+}
+
+func (s *DataStore) DeleteFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) error {
+	s.mu.Lock()
+	s.DeleteFMAUpdateDelayFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeleteFMAUpdateDelayFunc(ctx, teamID, titleID)
 }
 
 func (s *DataStore) HasFMAInstallerVersion(ctx context.Context, teamID *uint, fmaID uint, version string) (versionExists bool, storageID string, err error) {

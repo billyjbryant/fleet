@@ -71,10 +71,14 @@ func TestSoftwareInstallers(t *testing.T) {
 		{"AddSoftwareTitleToMatchingSoftware", testAddSoftwareTitleToMatchingSoftware},
 		{"FleetMaintainedAppInstallerUpdates", testFleetMaintainedAppInstallerUpdates},
 		{"ListFleetMaintainedAppActiveInstallers", testListFleetMaintainedAppActiveInstallers},
+		{"FMAUpdateDelayCRUD", testFMAUpdateDelayCRUD},
+		{"FMAActiveInstallerCandidates", testFMAActiveInstallerCandidates},
 		{"HasFMAInstallerVersion", testHasFMAInstallerVersion},
 		{"InsertFleetMaintainedAppVersion", testInsertFleetMaintainedAppVersion},
 		{"InsertFleetMaintainedAppVersionProtectsLiveActive", testInsertFleetMaintainedAppVersionProtectsLiveActive},
 		{"InsertFleetMaintainedAppVersionClonesLiveActive", testInsertFleetMaintainedAppVersionClonesLiveActive},
+		{"FMAFirstSeenAtWriteOnce", testFMAFirstSeenAtWriteOnce},
+		{"FMAFirstSeenAtResetsOnRebuild", testFMAFirstSeenAtResetsOnRebuild},
 		{"GetSoftwareInstallerMetadataByStorageID", testGetSoftwareInstallerMetadataByStorageID},
 		{"SoftwareTitlePins", testSoftwareTitlePins},
 		{"SetFleetMaintainedAppActiveInstallerPin", testSetFleetMaintainedAppActiveInstallerPin},
@@ -9998,4 +10002,242 @@ func testBatchSetSoftwareInstallersConflictingFMA(t *testing.T, ds *Datastore) {
 	// Add Firefox ESR to Unassigned, which has no Firefox, it should be allowed.
 	_, err = ds.BatchSetSoftwareInstallers(ctx, nil, []*fleet.UploadSoftwareInstallerPayload{mkFMA(nil, firefoxESR, "ff-154", "154.0")})
 	require.NoError(t, err)
+}
+
+// fmaFirstSeenFixture adds an FMA title with one installer and returns a getter for
+// the versions' timestamps plus a setter that pins them to a time in the past.
+func fmaFirstSeenFixture(t *testing.T, ds *Datastore) (teamID, titleID, installerID uint, versions func() map[string]fleet.FleetMaintainedVersion, pinPast func(id uint)) {
+	ctx := t.Context()
+	user := test.NewUser(t, ds, "Alice", "alice@example.com", true)
+	team, err := ds.NewTeam(ctx, &fleet.Team{Name: t.Name()})
+	require.NoError(t, err)
+	app, err := ds.UpsertMaintainedApp(ctx, &fleet.MaintainedApp{
+		Name: "FirstSeen", Slug: "firstseen/darwin", Platform: "darwin", UniqueIdentifier: "fleet.firstseen",
+	})
+	require.NoError(t, err)
+	tfr, err := fleet.NewTempFileReader(strings.NewReader("v1"), t.TempDir)
+	require.NoError(t, err)
+	installerID, titleID, err = ds.MatchOrCreateSoftwareInstaller(ctx, &fleet.UploadSoftwareInstallerPayload{
+		Title: "FirstSeen", Source: "apps", Platform: "darwin", BundleIdentifier: "fleet.firstseen",
+		InstallScript: "echo install", UninstallScript: "echo uninstall",
+		InstallerFile: tfr, StorageID: "sha-v1", Filename: "fs-1.0.pkg", Extension: "pkg",
+		Version: "1.0", UserID: user.ID, TeamID: &team.ID, FleetMaintainedAppID: &app.ID,
+		ValidatedLabels: &fleet.LabelIdentsWithScope{},
+	})
+	require.NoError(t, err)
+
+	versions = func() map[string]fleet.FleetMaintainedVersion {
+		got, err := ds.GetFleetMaintainedVersionsByTitleID(ctx, &team.ID, titleID)
+		require.NoError(t, err)
+		out := make(map[string]fleet.FleetMaintainedVersion, len(got))
+		for _, v := range got {
+			out[v.Version] = v
+		}
+		return out
+	}
+	pinPast = func(id uint) {
+		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+			_, err := q.ExecContext(ctx,
+				`UPDATE software_installers SET first_seen_at = '2020-01-01 00:00:00', uploaded_at = '2020-01-01 00:00:00' WHERE id = ?`, id)
+			return err
+		})
+	}
+	return team.ID, titleID, installerID, versions, pinPast
+}
+
+func testFMAFirstSeenAtWriteOnce(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	_, _, installerID, versions, pinPast := fmaFirstSeenFixture(t, ds)
+	pinPast(installerID)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	require.True(t, versions()["1.0"].FirstSeenAt.Equal(past))
+
+	require.NoError(t, ds.MarkFleetMaintainedAppVersionCurrent(ctx, installerID))
+	got := versions()["1.0"]
+	assert.True(t, got.FirstSeenAt.Equal(past), "marking current must not touch first_seen_at")
+	assert.True(t, got.UploadedAt.After(past), "marking current still bumps uploaded_at")
+
+	v2ID, err := ds.InsertFleetMaintainedAppVersion(ctx, installerID, &fleet.UploadSoftwareInstallerPayload{
+		Version: "2.0", Filename: "fs-2.0.pkg", Extension: "pkg", StorageID: "sha-v2",
+		URL: "https://example.test/fs-2.0.pkg", InstallScript: "echo install", UninstallScript: "echo uninstall",
+	})
+	require.NoError(t, err)
+	assert.True(t, versions()["2.0"].FirstSeenAt.After(past), "a new version row starts now")
+	pinPast(v2ID)
+
+	again, err := ds.InsertFleetMaintainedAppVersion(ctx, installerID, &fleet.UploadSoftwareInstallerPayload{
+		Version: "2.0", Filename: "fs-2.0.pkg", Extension: "pkg", StorageID: "sha-v2",
+		URL: "https://example.test/fs-2.0.pkg", InstallScript: "echo install", UninstallScript: "echo uninstall",
+	})
+	require.NoError(t, err)
+	require.Equal(t, v2ID, again)
+	assert.True(t, versions()["2.0"].FirstSeenAt.Equal(past), "same version and same bytes must not reset first_seen_at")
+}
+
+func testFMAFirstSeenAtResetsOnRebuild(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	teamID, _, installerID, versions, pinPast := fmaFirstSeenFixture(t, ds)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	v2ID, err := ds.InsertFleetMaintainedAppVersion(ctx, installerID, &fleet.UploadSoftwareInstallerPayload{
+		Version: "2.0", Filename: "fs-2.0.pkg", Extension: "pkg", StorageID: "sha-v2",
+		URL: "https://example.test/fs-2.0.pkg", InstallScript: "echo install", UninstallScript: "echo uninstall",
+	})
+	require.NoError(t, err)
+	pinPast(v2ID)
+
+	rebuilt, err := ds.InsertFleetMaintainedAppVersion(ctx, installerID, &fleet.UploadSoftwareInstallerPayload{
+		Version: "2.0", Filename: "fs-2.0.pkg", Extension: "pkg", StorageID: "sha-v2-rebuilt",
+		URL: "https://example.test/fs-2.0.pkg", InstallScript: "echo install", UninstallScript: "echo uninstall",
+	})
+	require.NoError(t, err)
+	require.Equal(t, v2ID, rebuilt)
+	assert.True(t, versions()["2.0"].FirstSeenAt.After(past), "InsertFleetMaintainedAppVersion with new bytes resets first_seen_at")
+
+	// BatchSet: an unchanged hash leaves first_seen_at alone, a changed hash resets it.
+	var app struct {
+		ID     uint `db:"fleet_maintained_app_id"`
+		UserID uint `db:"user_id"`
+	}
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q, &app, `SELECT fleet_maintained_app_id, user_id FROM software_installers WHERE id = ?`, installerID)
+	})
+	batch := func(storage string) {
+		tfr, err := fleet.NewTempFileReader(strings.NewReader(storage), t.TempDir)
+		require.NoError(t, err)
+		_, err = ds.BatchSetSoftwareInstallers(ctx, &teamID, []*fleet.UploadSoftwareInstallerPayload{{
+			InstallerFile: tfr, StorageID: storage, Title: "FirstSeen", Version: "1.0",
+			Source: "apps", Platform: "darwin", BundleIdentifier: "fleet.firstseen",
+			FleetMaintainedAppID: &app.ID, FMAName: "FirstSeen", UserID: app.UserID,
+			ValidatedLabels: &fleet.LabelIdentsWithScope{}, TeamID: &teamID,
+			Filename: "fs-1.0.pkg", Extension: "pkg",
+			InstallScript: "echo install", UninstallScript: "echo uninstall",
+		}})
+		require.NoError(t, err)
+	}
+	pinPast(installerID)
+	batch("sha-v1")
+	assert.True(t, versions()["1.0"].FirstSeenAt.Equal(past), "BatchSet with the same hash must not reset first_seen_at")
+	batch("sha-v1-rebuilt")
+	assert.True(t, versions()["1.0"].FirstSeenAt.After(past), "BatchSet with a different hash resets first_seen_at")
+}
+
+func testFMAUpdateDelayCRUD(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	team, err := ds.NewTeam(ctx, &fleet.Team{Name: "team-fma-delay"})
+	require.NoError(t, err)
+	var title uint
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		res, err := q.ExecContext(ctx, `INSERT INTO software_titles (name, source, extension_for) VALUES ('DelayApp', 'apps', '')`)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		title = uint(id) //nolint:gosec // dismiss G115
+		return err
+	})
+
+	for _, teamID := range []*uint{&team.ID, nil} {
+		got, err := ds.GetFMAUpdateDelay(ctx, teamID, title)
+		require.NoError(t, err)
+		require.Nil(t, got)
+
+		require.NoError(t, ds.SetFMAUpdateDelay(ctx, teamID, title, 7))
+		got, err = ds.GetFMAUpdateDelay(ctx, teamID, title)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(t, uint(7), *got)
+
+		require.NoError(t, ds.SetFMAUpdateDelay(ctx, teamID, title, 0))
+		got, err = ds.GetFMAUpdateDelay(ctx, teamID, title)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(t, uint(0), *got)
+
+		require.NoError(t, ds.DeleteFMAUpdateDelay(ctx, teamID, title))
+		got, err = ds.GetFMAUpdateDelay(ctx, teamID, title)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	}
+
+	// Delays are scoped per fleet.
+	require.NoError(t, ds.SetFMAUpdateDelay(ctx, &team.ID, title, 3))
+	got, err := ds.GetFMAUpdateDelay(ctx, nil, title)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	// Deleting the team removes its rows.
+	require.NoError(t, ds.DeleteTeam(ctx, team.ID))
+	got, err = ds.GetFMAUpdateDelay(ctx, &team.ID, title)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+func testFMAActiveInstallerCandidates(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	user := test.NewUser(t, ds, "Alice", "alice@example.com", true)
+	team, err := ds.NewTeam(ctx, &fleet.Team{Name: "team-fma-candidates"})
+	require.NoError(t, err)
+	maintainedApp, err := ds.UpsertMaintainedApp(ctx, &fleet.MaintainedApp{
+		Name: "Maintained1", Slug: "maintained1", Platform: "darwin", UniqueIdentifier: "fleet.maintained1",
+	})
+	require.NoError(t, err)
+
+	newInstaller := func(title, storageID string, fmaID *uint) uint {
+		tfr, err := fleet.NewTempFileReader(strings.NewReader(storageID), t.TempDir)
+		require.NoError(t, err)
+		id, _, err := ds.MatchOrCreateSoftwareInstaller(ctx, &fleet.UploadSoftwareInstallerPayload{
+			Title:                title,
+			Source:               "apps",
+			Platform:             "darwin",
+			InstallScript:        "echo install",
+			UninstallScript:      "echo uninstall",
+			InstallerFile:        tfr,
+			StorageID:            storageID,
+			Filename:             storageID + ".pkg",
+			Version:              "1.0",
+			UserID:               user.ID,
+			TeamID:               &team.ID,
+			ValidatedLabels:      &fleet.LabelIdentsWithScope{},
+			FleetMaintainedAppID: fmaID,
+		})
+		require.NoError(t, err)
+		return id
+	}
+	fmaInstallerID := newInstaller("FooFMA", "storage-fma", &maintainedApp.ID)
+	customInstallerID := newInstaller("Custom", "storage-custom", nil)
+
+	var fmaTitleID, customTitleID uint
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		if err := sqlx.GetContext(ctx, q, &fmaTitleID, `SELECT title_id FROM software_installers WHERE id = ?`, fmaInstallerID); err != nil {
+			return err
+		}
+		return sqlx.GetContext(ctx, q, &customTitleID, `SELECT title_id FROM software_installers WHERE id = ?`, customInstallerID)
+	})
+
+	listed := func() fleet.FMAAutoUpdateCandidate {
+		all, err := ds.ListFleetMaintainedAppActiveInstallers(ctx)
+		require.NoError(t, err)
+		require.Len(t, all, 1)
+		return all[0]
+	}
+
+	c := listed()
+	require.Equal(t, fmaInstallerID, c.InstallerID)
+	require.Nil(t, c.UpdateDelayDays)
+	got, err := ds.GetFleetMaintainedAppActiveInstaller(ctx, &team.ID, fmaTitleID)
+	require.NoError(t, err)
+	require.Equal(t, c, *got)
+
+	require.NoError(t, ds.SetFMAUpdateDelay(ctx, &team.ID, fmaTitleID, 7))
+	c = listed()
+	require.NotNil(t, c.UpdateDelayDays)
+	require.Equal(t, uint(7), *c.UpdateDelayDays)
+	got, err = ds.GetFleetMaintainedAppActiveInstaller(ctx, &team.ID, fmaTitleID)
+	require.NoError(t, err)
+	require.Equal(t, c, *got)
+
+	_, err = ds.GetFleetMaintainedAppActiveInstaller(ctx, &team.ID, customTitleID)
+	require.Error(t, err)
+	require.True(t, fleet.IsNotFound(err))
 }

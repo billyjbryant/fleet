@@ -3634,6 +3634,7 @@ CREATE TABLE `software_installers` (
   `app_open_query` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT (_utf8mb4''),
   `install_script_edited` tinyint(1) NOT NULL DEFAULT '0',
   `uninstall_script_edited` tinyint(1) NOT NULL DEFAULT '0',
+  `first_seen_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_software_installers_dedup` (`global_or_team_id`,`title_id`,`dedup_token`),
   KEY `fk_software_installers_title` (`title_id`),
@@ -3702,6 +3703,18 @@ CREATE TABLE `software_title_team_pins` (
   PRIMARY KEY (`team_id`,`title_id`),
   KEY `fk_pin_title` (`title_id`),
   CONSTRAINT `fk_pin_title` FOREIGN KEY (`title_id`) REFERENCES `software_titles` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `software_title_team_update_delays` (
+  `team_id` int unsigned NOT NULL,
+  `title_id` int unsigned NOT NULL,
+  `update_delay_days` smallint unsigned NOT NULL,
+  `updated_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`team_id`,`title_id`),
+  KEY `fk_update_delay_title` (`title_id`),
+  CONSTRAINT `fk_update_delay_title` FOREIGN KEY (`title_id`) REFERENCES `software_titles` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;

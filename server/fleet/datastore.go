@@ -3479,6 +3479,10 @@ type Datastore interface {
 	// Used by the auto-update cron to decide whether to advance versions.
 	ListFleetMaintainedAppActiveInstallers(ctx context.Context) ([]FMAAutoUpdateCandidate, error)
 
+	// GetFleetMaintainedAppActiveInstaller returns the active Fleet-maintained app
+	// installer for a team and title, or a not found error when there is none.
+	GetFleetMaintainedAppActiveInstaller(ctx context.Context, teamID *uint, titleID uint) (*FMAAutoUpdateCandidate, error)
+
 	// GetSoftwareInstallerMetadataByStorageID describes any cached installer (active
 	// or inactive) with the given storage_id. Used by the auto-update cron to recover
 	// what it would otherwise have taken off the downloaded file, on the byte-dedup
@@ -3510,6 +3514,16 @@ type Datastore interface {
 
 	// DeletePinnedVersion removes the pin for the given team and title.
 	DeletePinnedVersion(ctx context.Context, teamID *uint, titleID uint) error
+
+	// GetFMAUpdateDelay returns the per-app update delay in days for a team and
+	// software title, or nil when none is set.
+	GetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) (*uint, error)
+
+	// SetFMAUpdateDelay sets the per-app update delay in days for a team and title.
+	SetFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint, days uint) error
+
+	// DeleteFMAUpdateDelay removes the per-app update delay for a team and title.
+	DeleteFMAUpdateDelay(ctx context.Context, teamID *uint, titleID uint) error
 
 	// HasFMAInstallerVersion returns true if the given FMA version is already
 	// cached as a software installer for the given team, and its storage hash.

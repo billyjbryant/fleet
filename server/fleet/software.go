@@ -471,6 +471,9 @@ type FleetMaintainedVersion struct {
 	Filename string `json:"filename" db:"filename"`
 	// UploadedAt is when this version was added to the database.
 	UploadedAt time.Time `json:"uploaded_at" db:"uploaded_at"`
+	// FirstSeenAt is when this version's installer bytes were first stored. Unlike
+	// UploadedAt, it isn't bumped when the version is re-marked as current.
+	FirstSeenAt time.Time `json:"first_seen_at" db:"first_seen_at"`
 }
 
 // FMAAutoUpdateCandidate is the active installer for one (team, title) backed
@@ -494,6 +497,8 @@ type FMAAutoUpdateCandidate struct {
 	// InstallScriptEdited and UninstallScriptEdited are the active installer's flags.
 	InstallScriptEdited   bool `db:"install_script_edited"`
 	UninstallScriptEdited bool `db:"uninstall_script_edited"`
+	// UpdateDelayDays is the app's per-fleet update delay, nil when unset.
+	UpdateDelayDays *uint `db:"update_delay_days"`
 }
 
 // SoftwareTitle represents a title backed by the `software_titles` table.

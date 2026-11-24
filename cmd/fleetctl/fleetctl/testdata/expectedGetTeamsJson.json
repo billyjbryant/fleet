@@ -13,6 +13,9 @@
           "vulnerabilities": true
         }
       },
+      "fleet_maintained_app_settings": {
+        "update_delay_days": null
+      },
       "host_count": 42,
       "host_expiry_settings": {
         "host_expiry_enabled": false,
@@ -124,6 +127,9 @@
           "uptime": true,
           "vulnerabilities": true
         }
+      },
+      "fleet_maintained_app_settings": {
+        "update_delay_days": null
       },
       "host_count": 43,
       "host_expiry_settings": {

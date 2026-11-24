@@ -134,6 +134,8 @@ type TeamPayload struct {
 	MDM                *TeamPayloadMDM          `json:"mdm"`
 	HostExpirySettings *HostExpirySettings      `json:"host_expiry_settings"`
 	Features           *TeamPayloadFeatures     `json:"features"`
+
+	FleetMaintainedAppSettings *FleetMaintainedAppSettings `json:"fleet_maintained_app_settings,omitempty"`
 	// Note AgentOptions must be set by a separate endpoint.
 }
 
@@ -368,6 +370,8 @@ type TeamConfig struct {
 	WebhookSettings    TeamWebhookSettings `json:"webhook_settings"`
 	Integrations       TeamIntegrations    `json:"integrations"`
 	MDM                TeamMDM             `json:"mdm"`
+	// FleetMaintainedAppSettings is stored in the teams.config JSON column.
+	FleetMaintainedAppSettings FleetMaintainedAppSettings `json:"fleet_maintained_app_settings"`
 	// the below aren't serialized as-is into config JSON column in the teams table
 	Features Features      `json:"features"`
 	Software *SoftwareSpec `json:"software,omitempty"`
@@ -380,6 +384,8 @@ func (t TeamConfig) ToLite() TeamConfigLite {
 		WebhookSettings:    t.WebhookSettings,
 		Integrations:       t.Integrations,
 		MDM:                t.MDM,
+
+		FleetMaintainedAppSettings: t.FleetMaintainedAppSettings,
 	}
 }
 
@@ -391,6 +397,8 @@ type TeamConfigLite struct {
 	WebhookSettings    TeamWebhookSettings `json:"webhook_settings"`
 	Integrations       TeamIntegrations    `json:"integrations"`
 	MDM                TeamMDM             `json:"mdm"`
+
+	FleetMaintainedAppSettings FleetMaintainedAppSettings `json:"fleet_maintained_app_settings"`
 }
 
 type TeamWebhookSettings struct {
@@ -1022,6 +1030,8 @@ type TeamSpec struct {
 	WebhookSettings    TeamSpecWebhookSettings `json:"webhook_settings"`
 	Integrations       TeamSpecIntegrations    `json:"integrations"`
 	Software           *SoftwareSpec           `json:"software,omitempty"`
+
+	FleetMaintainedAppSettings *FleetMaintainedAppSettings `json:"fleet_maintained_app_settings,omitempty"`
 }
 
 type TeamSpecWebhookSettings struct {

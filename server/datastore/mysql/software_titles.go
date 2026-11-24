@@ -1327,7 +1327,7 @@ func (ds *Datastore) getFleetMaintainedVersionsByTitleIDs(ctx context.Context, q
 	}
 
 	query := `
-		SELECT si.id, si.version, si.filename, si.title_id, si.uploaded_at
+		SELECT si.id, si.version, si.filename, si.title_id, si.uploaded_at, si.first_seen_at
 			FROM software_installers si
 		WHERE si.title_id IN (?) AND si.global_or_team_id = ? AND si.fleet_maintained_app_id IS NOT NULL
 		ORDER BY si.title_id, si.uploaded_at DESC, si.id DESC
