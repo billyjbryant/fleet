@@ -3939,6 +3939,29 @@ WHERE global_or_team_id = ? AND title_id = ? AND fleet_maintained_app_id IS NULL
 					existing = nil
 				}
 
+				// YAML settings describe the title, so under a delay they go to the active and pending versions
+				// too, not just the payload's row, which may not be live yet or may be evicted below.
+				if delayedPrevActiveID != 0 {
+					for _, id := range []uint{activeInstallerID, pendingInstallerID} {
+						if id == 0 || id == installerID {
+							continue
+						}
+						modified, err := syncFMAInstallerMetadataDB(ctx, tx, fmt.Sprintf(updateInstaller, ""), id, installer,
+							installScriptID, uninstallScriptID, postInstallScriptID)
+						if err != nil {
+							return ctxerr.Wrapf(ctx, err, "sync settings to cached version of %q", installer.Filename)
+						}
+						if modified && id == activeInstallerID {
+							affectedHostIDs, err := ds.runInstallerUpdateSideEffectsInTransaction(ctx, tx, id, true, false, true)
+							if err != nil {
+								return ctxerr.Wrapf(ctx, err, "processing active installer of %q", installer.Filename)
+							}
+							activateAffectedHostIDs = append(activateAffectedHostIDs, affectedHostIDs...)
+							modifiedInstallers = append(modifiedInstallers, id)
+						}
+					}
+				}
+
 				// Re-point this title's policies to the active FMA installer.
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE policies SET software_installer_id = ?
@@ -4368,21 +4391,6 @@ FOR SHARE OF si`
 	if p.PostInstallScript != "" {
 		postInstallMD5 = new(md5ChecksumScriptContent(p.PostInstallScript))
 	}
-	labelFlags := "0:0" // exclude:require_all
-	switch p.ValidatedLabels.LabelScope {
-	case fleet.LabelScopeExcludeAny:
-		labelFlags = "1:0"
-	case fleet.LabelScopeIncludeAll:
-		labelFlags = "0:1"
-	}
-	labelIDs := make([]uint, 0, len(p.ValidatedLabels.ByName))
-	for _, l := range p.ValidatedLabels.ByName {
-		labelIDs = append(labelIDs, l.LabelID)
-	}
-	labels := make([]string, 0, len(labelIDs))
-	for _, id := range slices.Sorted(slices.Values(labelIDs)) {
-		labels = append(labels, fmt.Sprintf("%d:%s", id, labelFlags))
-	}
 	categories := make([]string, 0, len(p.CategoryIDs))
 	for _, id := range slices.Sorted(slices.Values(p.CategoryIDs)) {
 		categories = append(categories, fmt.Sprint(id))
@@ -4398,7 +4406,7 @@ FOR SHARE OF si`
 		isFMA, p.Filename, p.Extension, p.Version,
 		p.Platform, p.UpgradeCode, p.URL,
 		p.HTTPETag, p.UserID,
-		strings.Join(labels, ","), strings.Join(categories, ","),
+		installerLabelsKey(*p.ValidatedLabels), strings.Join(categories, ","),
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -4435,6 +4443,59 @@ SELECT
 		}
 	}
 	return id, nil
+}
+
+// installerLabelsKey renders labels the way the label_id:exclude:require_all
+// GROUP_CONCAT over software_installer_labels does, for comparing in SQL.
+func installerLabelsKey(l fleet.LabelIdentsWithScope) string {
+	labelFlags := "0:0" // exclude:require_all
+	switch l.LabelScope {
+	case fleet.LabelScopeExcludeAny:
+		labelFlags = "1:0"
+	case fleet.LabelScopeIncludeAll:
+		labelFlags = "0:1"
+	}
+	labelIDs := make([]uint, 0, len(l.ByName))
+	for _, lbl := range l.ByName {
+		labelIDs = append(labelIDs, lbl.LabelID)
+	}
+	labels := make([]string, 0, len(labelIDs))
+	for _, id := range slices.Sorted(slices.Values(labelIDs)) {
+		labels = append(labels, fmt.Sprintf("%d:%s", id, labelFlags))
+	}
+	return strings.Join(labels, ",")
+}
+
+// syncFMAInstallerMetadataDB writes a payload's title-level settings (scripts,
+// queries, flags, labels and categories) to a cached FMA version other than the
+// payload's own row. It reports whether the row's install target changed, using
+// the same fields the batch apply checks for the row it writes.
+func syncFMAInstallerMetadataDB(ctx context.Context, tx sqlx.ExtContext, updateStmt string, id uint, p *fleet.UploadSoftwareInstallerPayload,
+	installScriptID, uninstallScriptID int64, postInstallScriptID *int64,
+) (bool, error) {
+	var modified bool
+	if err := sqlx.GetContext(ctx, tx, &modified, `
+		SELECT install_script_content_id != ? OR uninstall_script_content_id != ? OR pre_install_query != ? OR
+			NOT (post_install_script_content_id <=> ?) OR
+			COALESCE((SELECT GROUP_CONCAT(label_id, ':', exclude, ':', require_all ORDER BY label_id)
+				FROM software_installer_labels WHERE software_installer_id = si.id), '') != ?
+		FROM software_installers si WHERE id = ?
+	`, installScriptID, uninstallScriptID, p.PreInstallQuery, postInstallScriptID, installerLabelsKey(*p.ValidatedLabels), id); err != nil {
+		return false, ctxerr.Wrap(ctx, err, "check cached FMA version metadata")
+	}
+	if _, err := tx.ExecContext(ctx, updateStmt,
+		p.InstallDuringSetup, p.SelfService, installScriptID, uninstallScriptID, postInstallScriptID,
+		p.PreInstallQuery, p.PatchQuery, p.AppOpenQuery, p.InstallScriptEdited, p.UninstallScriptEdited, id,
+	); err != nil {
+		return false, ctxerr.Wrap(ctx, err, "update cached FMA version metadata")
+	}
+	if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, id, *p.ValidatedLabels, softwareTypeInstaller); err != nil {
+		return false, ctxerr.Wrap(ctx, err, "update cached FMA version labels")
+	}
+	if err := setOrUpdateSoftwareInstallerCategoriesDB(ctx, tx, id, p.CategoryIDs, softwareTypeInstaller); err != nil {
+		return false, ctxerr.Wrap(ctx, err, "update cached FMA version categories")
+	}
+	return modified, nil
 }
 
 func (ds *Datastore) HasSelfServiceSoftwareInstallers(ctx context.Context, hostPlatform string, hostTeamID *uint) (bool, error) {

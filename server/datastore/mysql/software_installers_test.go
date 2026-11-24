@@ -90,6 +90,8 @@ func TestSoftwareInstallers(t *testing.T) {
 		{"BatchSetFMARespectsUpdateDelay", testBatchSetFMARespectsUpdateDelay},
 		{"BatchSetFMAUpdateDelayDoesNotStarve", testBatchSetFMAUpdateDelayDoesNotStarve},
 		{"BatchSetFMAUpdateDelayRow", testBatchSetFMAUpdateDelayRow},
+		{"BatchSetFMAUpdateDelayHoldSyncsSettings", testBatchSetFMAUpdateDelayHoldSyncsSettings},
+		{"BatchSetFMAUpdateDelayEvictedPayloadSyncsSettings", testBatchSetFMAUpdateDelayEvictedPayloadSyncsSettings},
 		{"SoftwareInstallerTitleIDValidation", testSoftwareInstallerTitleIDValidation},
 		{"MatchOrCreateSoftwareInstallerDuplicateConflicts", testMatchOrCreateSoftwareInstallerDuplicateConflicts},
 		{"SetHostSoftwareInstallResultResolvesOrphanedActivity", testSetHostSoftwareInstallResultResolvesOrphanedActivity},
@@ -10442,4 +10444,98 @@ func testBatchSetFMAUpdateDelayRow(t *testing.T, ds *Datastore) {
 	got, err = ds.GetFMAUpdateDelay(ctx, &f.team.ID, titleID)
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+type fmaDelaySettings struct {
+	SelfService   bool   `db:"self_service"`
+	InstallScript string `db:"install_script"`
+	Labels        string `db:"labels"`
+}
+
+func (f *fmaDelayFixture) settings(version string) fmaDelaySettings {
+	f.t.Helper()
+	var got fmaDelaySettings
+	ExecAdhocSQL(f.t, f.ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(f.t.Context(), q, &got, `
+			SELECT si.self_service, sc.contents AS install_script,
+				COALESCE((SELECT GROUP_CONCAT(label_id, ':', exclude ORDER BY label_id)
+					FROM software_installer_labels WHERE software_installer_id = si.id), '') AS labels
+			FROM software_installers si JOIN script_contents sc ON sc.id = si.install_script_content_id
+			WHERE si.global_or_team_id = ? AND si.fleet_maintained_app_id IS NOT NULL AND si.version = ?`, f.team.ID, version)
+	})
+	return got
+}
+
+// editedPayload is a payload carrying a YAML edit: an exclude label, self-service, and a fixed install script.
+func (f *fmaDelayFixture) editedPayload(version string, effectiveDelay uint, lbl *fleet.Label) *fleet.UploadSoftwareInstallerPayload {
+	p := f.payload(version, effectiveDelay)
+	p.SelfService = true
+	p.InstallScript = "echo install fixed"
+	p.ValidatedLabels = &fleet.LabelIdentsWithScope{
+		LabelScope: fleet.LabelScopeExcludeAny,
+		ByName:     map[string]fleet.LabelIdent{lbl.Name: {LabelID: lbl.ID, LabelName: lbl.Name}},
+	}
+	return p
+}
+
+func (f *fmaDelayFixture) queuedInstalls(installerID uint) int {
+	var n int
+	ExecAdhocSQL(f.t, f.ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(f.t.Context(), q, &n,
+			`SELECT COUNT(*) FROM software_install_upcoming_activities WHERE software_installer_id = ?`, installerID)
+	})
+	return n
+}
+
+func testBatchSetFMAUpdateDelayHoldSyncsSettings(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	f := newFMADelayFixture(t, ds)
+	lbl, err := ds.NewLabel(ctx, &fleet.Label{Name: t.Name() + "-lbl", Query: "SELECT 1"})
+	require.NoError(t, err)
+	host := test.NewHost(t, ds, "host_fma_hold_sync", "1", "hostkey_fma_hold_sync", "hostuuid_fma_hold_sync", time.Now())
+
+	f.apply(f.payload("1.0", 7))
+	f.apply(f.payload("2.0", 7))
+	v1 := f.active()
+	require.Equal(t, "1.0", v1.Version)
+	_, err = ds.InsertSoftwareInstallRequest(ctx, host.ID, v1.ID, fleet.HostSoftwareInstallOptions{})
+	require.NoError(t, err)
+
+	f.apply(f.editedPayload("2.0", 7, lbl))
+	require.Equal(t, v1.ID, f.active().ID)
+	want := fmaDelaySettings{SelfService: true, InstallScript: "echo install fixed", Labels: fmt.Sprintf("%d:1", lbl.ID)}
+	require.Equal(t, want, f.settings("1.0"), "active row")
+	require.Equal(t, want, f.settings("2.0"), "pending row")
+	require.Zero(t, f.queuedInstalls(v1.ID), "a changed install target cancels the active row's queued installs")
+
+	// Re-applying the same settings leaves the active row's queued installs alone.
+	_, err = ds.InsertSoftwareInstallRequest(ctx, host.ID, v1.ID, fleet.HostSoftwareInstallOptions{})
+	require.NoError(t, err)
+	f.apply(f.editedPayload("2.0", 7, lbl))
+	require.Equal(t, 1, f.queuedInstalls(v1.ID))
+}
+
+func testBatchSetFMAUpdateDelayEvictedPayloadSyncsSettings(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	f := newFMADelayFixture(t, ds)
+	lbl, err := ds.NewLabel(ctx, &fleet.Label{Name: t.Name() + "-lbl", Query: "SELECT 1"})
+	require.NoError(t, err)
+
+	f.apply(f.payload("1.0", 7))
+	f.apply(f.payload("2.0", 7))
+
+	// v3's row is written and evicted in the same apply; the edit still reaches v1 and v2.
+	f.apply(f.editedPayload("3.0", 7, lbl))
+	require.Equal(t, []string{"2.0", "1.0"}, f.versions())
+	require.Equal(t, "1.0", f.active().Version)
+	want := fmaDelaySettings{SelfService: true, InstallScript: "echo install fixed", Labels: fmt.Sprintf("%d:1", lbl.ID)}
+	require.Equal(t, want, f.settings("1.0"), "active row")
+	require.Equal(t, want, f.settings("2.0"), "pending row")
+
+	f.ageFirstSeen(8, "2.0")
+	f.apply(f.editedPayload("3.0", 7, lbl))
+	require.Equal(t, "2.0", f.active().Version)
+	require.Equal(t, []string{"3.0", "2.0"}, f.versions())
+	require.Equal(t, want, f.settings("2.0"), "promoted row")
+	require.Equal(t, want, f.settings("3.0"), "new pending row")
 }
