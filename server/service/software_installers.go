@@ -64,6 +64,8 @@ type updateSoftwareInstallerRequest struct {
 	DisplayName       *string
 	// Version pins a Fleet-maintained app to a cached version; empty means "Latest", omitted leaves it unchanged.
 	Version *string
+	// UpdateDelayDays is a Fleet-maintained app's update delay in days; empty means inherit, omitted leaves it unchanged.
+	UpdateDelayDays *string
 	// Configuration is the in-house app's managed app configuration as raw XML bytes (iOS / iPadOS only). nil means leave unchanged.
 	Configuration []byte
 	// Patch creates or keeps the title's patch policy when true and deletes it when false. Omitted leaves it unchanged. FMA-only.
@@ -177,6 +179,10 @@ func (updateSoftwareInstallerRequest) DecodeRequest(ctx context.Context, r *http
 	// Only set Version when the field is present, so an omitted field stays nil and an empty value means "Latest".
 	if versionMultipart, ok := r.MultipartForm.Value["version"]; ok && len(versionMultipart) > 0 {
 		decoded.Version = &versionMultipart[0]
+	}
+
+	if delayMultipart, ok := r.MultipartForm.Value["update_delay_days"]; ok && len(delayMultipart) > 0 {
+		decoded.UpdateDelayDays = &delayMultipart[0]
 	}
 
 	if patchVal, ok := r.MultipartForm.Value["patch"]; ok && len(patchVal) > 0 && patchVal[0] != "" {
@@ -328,6 +334,7 @@ func updateSoftwareInstallerEndpoint(ctx context.Context, request interface{}, s
 		DisplayName:          req.DisplayName,
 		Configuration:        req.Configuration,
 		PinnedVersion:        req.Version,
+		UpdateDelayDays:      req.UpdateDelayDays,
 		Patch:                req.Patch,
 		PatchWhenClosed:      req.PatchWhenClosed,
 		NotifyBeforePatching: req.NotifyBeforePatching,
