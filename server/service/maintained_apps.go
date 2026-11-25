@@ -199,3 +199,35 @@ func (svc *Service) GetFleetMaintainedApp(ctx context.Context, appID uint, teamI
 
 	return nil, fleet.ErrMissingLicense
 }
+
+type promoteFleetMaintainedAppVersionRequest struct {
+	TitleID uint `url:"title_id"`
+	// TeamID is required; 0 means unassigned.
+	TeamID *uint `query:"fleet_id"`
+}
+
+type promoteFleetMaintainedAppVersionResponse struct {
+	Version *fleet.FleetMaintainedVersion `json:"version,omitempty"`
+	Err     error                         `json:"error,omitempty"`
+}
+
+func (r promoteFleetMaintainedAppVersionResponse) Error() error { return r.Err }
+
+func promoteFleetMaintainedAppVersionEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*promoteFleetMaintainedAppVersionRequest)
+
+	version, err := svc.PromoteFleetMaintainedAppVersion(ctx, req.TitleID, req.TeamID)
+	if err != nil {
+		return promoteFleetMaintainedAppVersionResponse{Err: err}, nil
+	}
+
+	return promoteFleetMaintainedAppVersionResponse{Version: version}, nil
+}
+
+func (svc *Service) PromoteFleetMaintainedAppVersion(ctx context.Context, titleID uint, teamID *uint) (*fleet.FleetMaintainedVersion, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return nil, fleet.ErrMissingLicense
+}

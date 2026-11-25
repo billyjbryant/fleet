@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -315,4 +318,81 @@ func (svc *Service) GetFleetMaintainedApp(ctx context.Context, appID uint, teamI
 	}
 
 	return maintained_apps.Hydrate(ctx, app, "", teamID, nil)
+}
+
+func (svc *Service) PromoteFleetMaintainedAppVersion(ctx context.Context, titleID uint, teamID *uint) (*fleet.FleetMaintainedVersion, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.SoftwareInstaller{TeamID: teamID}, fleet.ActionWrite); err != nil {
+		return nil, err
+	}
+
+	vc, ok := viewer.FromContext(ctx)
+	if !ok {
+		return nil, fleet.ErrNoContext
+	}
+
+	candidate, err := svc.ds.GetFleetMaintainedAppActiveInstaller(ctx, teamID, titleID)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting active fleet-maintained app installer")
+	}
+
+	pin := ""
+	pinned, err := svc.ds.GetPinnedVersion(ctx, candidate.TeamID, titleID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, ctxerr.Wrap(ctx, err, "getting pinned version")
+	}
+	if pinned != nil {
+		pin = *pinned
+	}
+	if pin != "" && !strings.HasPrefix(pin, "^") {
+		return nil, &fleet.BadRequestError{Message: "Couldn't promote: this app is pinned to a specific version."}
+	}
+
+	versions, err := svc.ds.GetFleetMaintainedVersionsByTitleID(ctx, candidate.TeamID, titleID)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting cached versions")
+	}
+
+	if err := promoteFleetMaintainedApp(ctx, svc.ds, svc.logger, *candidate, pin, "", 0, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+
+	promoted, err := svc.ds.GetFleetMaintainedAppActiveInstaller(ctx, teamID, titleID)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting promoted fleet-maintained app installer")
+	}
+	if promoted.InstallerID == candidate.InstallerID {
+		return nil, &fleet.ConflictError{Message: "Couldn't promote: no newer version is pending."}
+	}
+
+	var teamName *string
+	var actTeamID *uint
+	if candidate.TeamID != nil {
+		t, err := svc.ds.TeamLite(ctx, *candidate.TeamID)
+		if err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "getting team name for promoted fleet-maintained app")
+		}
+		teamName, actTeamID = &t.Name, candidate.TeamID
+	}
+
+	meta, err := svc.ds.GetSoftwareInstallerMetadataByTeamAndTitleID(ctx, teamID, titleID, false)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting promoted installer metadata")
+	}
+
+	if err := svc.NewActivity(ctx, vc.User, fleet.ActivityTypePromotedFleetMaintainedAppVersion{
+		SoftwareTitle:   meta.SoftwareTitle,
+		SoftwareTitleID: titleID,
+		TeamName:        teamName,
+		TeamID:          actTeamID,
+		FromVersion:     candidate.Version,
+		ToVersion:       promoted.Version,
+	}); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "creating activity for promoted fleet-maintained app version")
+	}
+
+	i := slices.IndexFunc(versions, func(v fleet.FleetMaintainedVersion) bool { return v.ID == promoted.InstallerID })
+	if i < 0 {
+		return &fleet.FleetMaintainedVersion{ID: promoted.InstallerID, Version: promoted.Version}, nil
+	}
+	return &versions[i], nil
 }
