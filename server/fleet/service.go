@@ -1542,6 +1542,9 @@ type Service interface {
 	ListFleetMaintainedApps(ctx context.Context, teamID *uint, opts MaintainedAppListOptions) ([]MaintainedApp, *PaginationMetadata, error)
 	// GetFleetMaintainedApp returns a Fleet-maintained app by ID, including associated software title for supplied team ID (if any)
 	GetFleetMaintainedApp(ctx context.Context, appID uint, teamID *uint) (*MaintainedApp, error)
+	// PromoteFleetMaintainedAppVersion makes the newest cached version the pin allows the active
+	// one, skipping any update delay, and returns the version it promoted.
+	PromoteFleetMaintainedAppVersion(ctx context.Context, titleID uint, teamID *uint) (*FleetMaintainedVersion, error)
 
 	// /////////////////////////////////////////////////////////////////////////////
 	// Maintenance windows

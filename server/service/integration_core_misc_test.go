@@ -663,3 +663,10 @@ func (s *integrationTestSuite) TestConditionalAccessRequiresPremium() {
 	s.DoJSON("DELETE", "/api/latest/fleet/conditional-access/microsoft", nil,
 		http.StatusPaymentRequired, &d)
 }
+
+func (s *integrationTestSuite) TestPromoteFleetMaintainedAppVersionFreeTier() {
+	t := s.T()
+
+	res := s.DoRaw("POST", "/api/latest/fleet/software/titles/1/fleet_maintained_app/promote?fleet_id=0", nil, http.StatusPaymentRequired)
+	assert.Contains(t, extractServerErrorText(res.Body), fleet.ErrMissingLicense.Error())
+}

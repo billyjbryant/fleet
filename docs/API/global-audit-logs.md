@@ -3509,6 +3509,7 @@ This activity contains the following fields:
 - [uninstalled_software](#uninstalled-software)
 - [added_software](#added-software)
 - [edited_software](#edited-software)
+- [promoted_fleet_maintained_app_version](#promoted-fleet-maintained-app-version)
 - [deleted_software](#deleted-software)
 - [added_app_store_app](#added-app-store-app)
 - [deleted_app_store_app](#deleted-app-store-app)
@@ -3756,6 +3757,31 @@ This activity contains the following fields:
       "id": 17
     }
   ]
+}
+```
+
+### promoted_fleet_maintained_app_version
+
+Generated when a pending version of a Fleet-maintained app is promoted to the active version before its update delay has elapsed.
+
+This activity contains the following fields:
+- "software_title": Name of the software.
+- "software_title_id": ID of the software title.
+- "fleet_name": Name of the fleet on which this software was promoted. `null` if it was promoted on no fleet.
+- "fleet_id": The ID of the fleet on which this software was promoted. `null` if it was promoted on no fleet.
+- "from_version": The version that was active before the promotion.
+- "to_version": The version that is active after the promotion.
+
+#### Example
+
+```json
+{
+  "software_title": "Falcon.app",
+  "software_title_id": 2234,
+  "fleet_name": "Workstations",
+  "fleet_id": 123,
+  "from_version": "6.43",
+  "to_version": "6.44"
 }
 ```
 

@@ -39,6 +39,7 @@ import (
 	maintained_apps "github.com/fleetdm/fleet/v4/server/mdm/maintainedapps"
 	"github.com/fleetdm/fleet/v4/server/mdm/maintainedapps/maintainedappstest"
 	"github.com/fleetdm/fleet/v4/server/service/osquery_utils"
+	"github.com/fleetdm/fleet/v4/server/test"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
@@ -3918,4 +3919,122 @@ func (s *integrationEnterpriseTestSuite) TestFMAUpdateDelayEditAndRead() {
 	}, http.StatusOK, "")
 	customTitleID := getSoftwareTitleID(t, s.ds, "ruby", "deb_packages")
 	patchDelay(customTitleID, "3", http.StatusBadRequest)
+}
+
+func (s *integrationEnterpriseTestSuite) TestFMAPromoteNow() {
+	t := s.T()
+	ctx := t.Context()
+
+	zoom := &fmaTestState{
+		version:        "1.0",
+		installerBytes: []byte("zoom-1.0"),
+		installerPath:  "/zoom.msi",
+		patchQuery:     "SELECT 1 FROM osquery_info;",
+	}
+	startFMAServers(t, s.ds, map[string]*fmaTestState{"/zoom/windows.json": zoom})
+
+	var teamResp teamResponse
+	s.DoJSON("POST", "/api/latest/fleet/fleets", &createTeamRequest{Name: new("fma_promote_" + t.Name())}, http.StatusOK, &teamResp)
+	team := *teamResp.Team
+	otherTeam, err := s.ds.NewTeam(ctx, &fleet.Team{Name: "fma_promote_other_" + t.Name()})
+	require.NoError(t, err)
+
+	batchSet := func() uint {
+		var resp batchSetSoftwareInstallersResponse
+		s.DoJSON("POST", "/api/latest/fleet/software/batch",
+			batchSetSoftwareInstallersRequest{Software: []*fleet.SoftwareInstallerPayload{{Slug: new("zoom/windows")}}, TeamName: team.Name},
+			http.StatusAccepted, &resp, "fleet_name", team.Name)
+		pkgs := waitBatchSetSoftwareInstallersCompleted(t, &s.withServer, team.Name, resp.RequestUUID)
+		require.NotEmpty(t, pkgs)
+		require.NotNil(t, pkgs[0].TitleID)
+		return *pkgs[0].TitleID
+	}
+	titleID := batchSet()
+	promotePath := fmt.Sprintf("/api/latest/fleet/software/titles/%d/fleet_maintained_app/promote", titleID)
+
+	getPkg := func() *fleet.SoftwareInstaller {
+		var resp getSoftwareTitleResponse
+		s.DoJSON("GET", fmt.Sprintf("/api/latest/fleet/software/titles/%d", titleID), nil, http.StatusOK, &resp, "fleet_id", fmt.Sprint(team.ID))
+		require.NotNil(t, resp.SoftwareTitle)
+		require.NotEmpty(t, resp.SoftwareTitle.Packages)
+		return &resp.SoftwareTitle.Packages[0]
+	}
+	setPin := func(pin string) {
+		mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+			_, err := q.ExecContext(ctx,
+				`INSERT INTO software_title_team_pins (team_id, title_id, pinned_version) VALUES (?, ?, ?)
+				 ON DUPLICATE KEY UPDATE pinned_version = VALUES(pinned_version)`, team.ID, titleID, pin)
+			return err
+		})
+	}
+	clearPin := func() {
+		mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+			_, err := q.ExecContext(ctx, `DELETE FROM software_title_team_pins WHERE team_id = ? AND title_id = ?`, team.ID, titleID)
+			return err
+		})
+	}
+
+	// Nothing is pending yet.
+	var promoteResp promoteFleetMaintainedAppVersionResponse
+	s.DoJSON("POST", promotePath, nil, http.StatusConflict, &promoteResp, "fleet_id", fmt.Sprint(team.ID))
+
+	// A newer version waits out a 7-day delay.
+	s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings": {"update_delay_days": 7}}`), http.StatusOK)
+	t.Cleanup(func() {
+		s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings": {"update_delay_days": null}}`), http.StatusOK)
+	})
+	zoom.version = "2.0"
+	zoom.installerBytes = []byte("zoom-2.0")
+	zoom.ComputeSHA(zoom.installerBytes)
+	batchSet()
+	pkg := getPkg()
+	require.Equal(t, "1.0", pkg.Version)
+	require.NotNil(t, pkg.UpdateDelay)
+	require.NotNil(t, pkg.UpdateDelay.PendingVersion)
+	require.Equal(t, "2.0", *pkg.UpdateDelay.PendingVersion)
+
+	// Permissions: an observer and a maintainer of another fleet can't promote.
+	users := []struct {
+		name string
+		user *fleet.User
+	}{
+		{"team observer", &fleet.User{Teams: []fleet.UserTeam{{Team: team, Role: fleet.RoleObserver}}}},
+		{"other fleet maintainer", &fleet.User{Teams: []fleet.UserTeam{{Team: *otherTeam, Role: fleet.RoleMaintainer}}}},
+	}
+	for i, u := range users {
+		u.user.Email = fmt.Sprintf("fma_promote_%d@example.com", i)
+		u.user.Name = u.user.Email
+		require.NoError(t, u.user.SetPassword(test.GoodPassword, 10, 10))
+		_, err := s.ds.NewUser(ctx, u.user)
+		require.NoError(t, err)
+		s.setTokenForTest(t, u.user.Email, test.GoodPassword)
+		s.Do("POST", promotePath, nil, http.StatusForbidden, "fleet_id", fmt.Sprint(team.ID))
+	}
+	s.token = s.getTestAdminToken()
+	require.Equal(t, "1.0", getPkg().Version)
+
+	// A literal pin can't be promoted.
+	setPin("1.0")
+	s.Do("POST", promotePath, nil, http.StatusBadRequest, "fleet_id", fmt.Sprint(team.ID))
+	clearPin()
+
+	// The same title unassigned has no active installer.
+	s.Do("POST", promotePath, nil, http.StatusNotFound, "fleet_id", "0")
+
+	// Promote now skips the delay.
+	promoteResp = promoteFleetMaintainedAppVersionResponse{}
+	s.DoJSON("POST", promotePath, nil, http.StatusOK, &promoteResp, "fleet_id", fmt.Sprint(team.ID))
+	require.NotNil(t, promoteResp.Version)
+	require.Equal(t, "2.0", promoteResp.Version.Version)
+	pkg = getPkg()
+	require.Equal(t, "2.0", pkg.Version)
+	require.Nil(t, pkg.UpdateDelay.PendingVersion)
+	require.Nil(t, pkg.UpdateDelay.PromotesAt)
+	s.lastActivityMatches(fleet.ActivityTypePromotedFleetMaintainedAppVersion{}.ActivityName(), fmt.Sprintf(
+		`{"fleet_id": %d, "fleet_name": %q, "software_title": "Zoom Workplace (X64)", "software_title_id": %d, `+
+			`"from_version": "1.0", "to_version": "2.0"}`,
+		team.ID, team.Name, titleID), 0)
+
+	// Calling it again has nothing left to promote.
+	s.Do("POST", promotePath, nil, http.StatusConflict, "fleet_id", fmt.Sprint(team.ID))
 }

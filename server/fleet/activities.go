@@ -1554,6 +1554,19 @@ func (a ActivityTypeEditedSoftware) ActivityName() string {
 	return "edited_software"
 }
 
+type ActivityTypePromotedFleetMaintainedAppVersion struct {
+	SoftwareTitle   string  `json:"software_title"`
+	SoftwareTitleID uint    `json:"software_title_id"`
+	TeamName        *string `json:"fleet_name"`
+	TeamID          *uint   `json:"fleet_id"`
+	FromVersion     string  `json:"from_version"`
+	ToVersion       string  `json:"to_version"`
+}
+
+func (a ActivityTypePromotedFleetMaintainedAppVersion) ActivityName() string {
+	return "promoted_fleet_maintained_app_version"
+}
+
 type ActivityTypeDeletedSoftware struct {
 	SoftwareTitle    string                  `json:"software_title"`
 	SoftwarePackage  string                  `json:"software_package"`

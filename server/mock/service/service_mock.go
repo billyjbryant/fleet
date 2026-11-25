@@ -887,6 +887,8 @@ type ListFleetMaintainedAppsFunc func(ctx context.Context, teamID *uint, opts fl
 
 type GetFleetMaintainedAppFunc func(ctx context.Context, appID uint, teamID *uint) (*fleet.MaintainedApp, error)
 
+type PromoteFleetMaintainedAppVersionFunc func(ctx context.Context, titleID uint, teamID *uint) (*fleet.FleetMaintainedVersion, error)
+
 type CalendarWebhookFunc func(ctx context.Context, eventUUID string, channelID string, resourceState string) error
 
 type CreateSecretVariablesFunc func(ctx context.Context, secretVariables []fleet.SecretVariable, dryRun bool) error
@@ -2284,6 +2286,9 @@ type Service struct {
 
 	GetFleetMaintainedAppFunc        GetFleetMaintainedAppFunc
 	GetFleetMaintainedAppFuncInvoked bool
+
+	PromoteFleetMaintainedAppVersionFunc        PromoteFleetMaintainedAppVersionFunc
+	PromoteFleetMaintainedAppVersionFuncInvoked bool
 
 	CalendarWebhookFunc        CalendarWebhookFunc
 	CalendarWebhookFuncInvoked bool
@@ -5464,6 +5469,13 @@ func (s *Service) GetFleetMaintainedApp(ctx context.Context, appID uint, teamID 
 	s.GetFleetMaintainedAppFuncInvoked = true
 	s.mu.Unlock()
 	return s.GetFleetMaintainedAppFunc(ctx, appID, teamID)
+}
+
+func (s *Service) PromoteFleetMaintainedAppVersion(ctx context.Context, titleID uint, teamID *uint) (*fleet.FleetMaintainedVersion, error) {
+	s.mu.Lock()
+	s.PromoteFleetMaintainedAppVersionFuncInvoked = true
+	s.mu.Unlock()
+	return s.PromoteFleetMaintainedAppVersionFunc(ctx, titleID, teamID)
 }
 
 func (s *Service) CalendarWebhook(ctx context.Context, eventUUID string, channelID string, resourceState string) error {

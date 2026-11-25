@@ -354,6 +354,7 @@ var activityTemplatesByCategory = map[string][]fleet.ActivityDetails{
 		fleet.ActivityTypeUninstalledSoftware{},
 		fleet.ActivityTypeAddedSoftware{},
 		fleet.ActivityTypeEditedSoftware{},
+		fleet.ActivityTypePromotedFleetMaintainedAppVersion{},
 		fleet.ActivityTypeDeletedSoftware{},
 		fleet.ActivityTypeCanceledInstallSoftware{},
 		fleet.ActivityTypeCanceledUninstallSoftware{},
