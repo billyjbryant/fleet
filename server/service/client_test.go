@@ -1762,3 +1762,41 @@ spec:
 		})
 	}
 }
+
+func TestFMAUpdateDelayInSoftwarePayload(t *testing.T) {
+	t.Parallel()
+
+	delayed := fleet.MaintainedAppSpec{Slug: "app/darwin", UpdateDelayDays: new(uint(7))}
+	undelayed := fleet.MaintainedAppSpec{Slug: "other/darwin"}
+
+	payloads, err := buildSoftwarePackagesPayload([]fleet.SoftwarePackageSpec{
+		delayed.ToSoftwarePackageSpec(),
+		undelayed.ToSoftwarePackageSpec(),
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, payloads, 2)
+	require.NotNil(t, payloads[0].UpdateDelayDays)
+	assert.EqualValues(t, 7, *payloads[0].UpdateDelayDays)
+	assert.Nil(t, payloads[1].UpdateDelayDays, "an entry without update_delay_days must clear the per-app delay")
+
+	b, err := json.Marshal(payloads[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"fleet_maintained_app_update_delay_days":7`)
+}
+
+func TestFMASettingsOrClear(t *testing.T) {
+	t.Parallel()
+
+	for _, in := range []any{nil, map[string]any{}} {
+		out := fmaSettingsOrClear(in)
+		v, ok := out["update_delay_days"]
+		require.True(t, ok)
+		assert.Nil(t, v)
+		b, err := json.Marshal(out)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"update_delay_days":null}`, string(b))
+	}
+
+	out := fmaSettingsOrClear(map[string]any{"update_delay_days": 5})
+	assert.Equal(t, 5, out["update_delay_days"])
+}

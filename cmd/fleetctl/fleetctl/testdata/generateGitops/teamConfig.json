@@ -27,6 +27,9 @@
             "osqueryd": "edge"
         }
     },
+    "fleet_maintained_app_settings": {
+        "update_delay_days": 3
+    },
     "host_expiry_settings": {
         "host_expiry_enabled": false,
         "host_expiry_window": 1

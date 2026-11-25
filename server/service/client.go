@@ -1614,10 +1614,25 @@ func buildSoftwarePackagesPayload(specs []fleet.SoftwarePackageSpec, installDuri
 		if si.Slug != nil {
 			softwarePayloads[i].Slug = si.Slug
 			softwarePayloads[i].RollbackVersion = si.Version
+			softwarePayloads[i].UpdateDelayDays = si.UpdateDelayDays
 		}
 	}
 
 	return softwarePayloads, nil
+}
+
+// fmaSettingsOrClear returns the YAML fleet_maintained_app_settings with an
+// explicit null update_delay_days when it is not set, because the server
+// preserves an omitted value and GitOps clears settings that are not in YAML.
+func fmaSettingsOrClear(v any) map[string]any {
+	settings, _ := v.(map[string]any)
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	if _, ok := settings["update_delay_days"]; !ok {
+		settings["update_delay_days"] = nil
+	}
+	return settings
 }
 
 func getIconHashIfValid(path string) (string, error) {
@@ -2747,6 +2762,8 @@ func (c *Client) DoGitOps(
 			return nil, errors.New("org_settings.integrations.custom_scep_proxy is not supported, please use org_settings.certificate_authorities.custom_scep_proxy instead")
 		}
 
+		group.AppConfig.(map[string]any)["fleet_maintained_app_settings"] = fmaSettingsOrClear(group.AppConfig.(map[string]any)["fleet_maintained_app_settings"])
+
 		// Ensure webhooks settings exists
 		webhookSettings, ok := group.AppConfig.(map[string]any)["webhook_settings"]
 		if !ok || webhookSettings == nil {
@@ -2943,6 +2960,7 @@ func (c *Client) DoGitOps(
 		if features, ok := incoming.TeamSettings["features"]; ok {
 			team["features"] = features
 		}
+		team["fleet_maintained_app_settings"] = fmaSettingsOrClear(incoming.TeamSettings["fleet_maintained_app_settings"])
 		team["scripts"] = scripts
 		// Software: skip if excepted (key already validated as absent above).
 		if !exceptions.Software {

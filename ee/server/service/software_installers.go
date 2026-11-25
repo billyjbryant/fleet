@@ -3699,6 +3699,7 @@ func (svc *Service) softwareBatchUpload(
 				Categories:               p.Categories.Value,
 				DisplayName:              p.DisplayName,
 				RollbackVersion:          p.RollbackVersion,
+				FMAUpdateDelayDays:       p.UpdateDelayDays,
 				Configuration:            p.Configuration,
 			}
 

@@ -900,6 +900,9 @@ func (cmd *GenerateGitopsCommand) generateOrgSettings() (orgSettings map[string]
 		return nil, err
 	}
 	orgSettings[jsonFieldName(t, "Integrations")] = integrations
+	if cmd.AppConfig.FleetMaintainedAppSettings.UpdateDelayDays.Valid {
+		orgSettings[jsonFieldName(t, "FleetMaintainedAppSettings")] = cmd.AppConfig.FleetMaintainedAppSettings
+	}
 
 	certificateAuthorities, err := cmd.generateCertificateAuthorities("default.yml")
 	if err != nil {
@@ -1553,6 +1556,9 @@ func (cmd *GenerateGitopsCommand) generateTeamSettings(filePath string, team *fl
 		return nil, err
 	}
 	teamSettings[jsonFieldName(t, "Integrations")] = integrations
+	if team.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid {
+		teamSettings[jsonFieldName(t, "FleetMaintainedAppSettings")] = team.Config.FleetMaintainedAppSettings
+	}
 	// If --insecure is set, add real secrets.
 	if cmd.CLI.Bool("insecure") {
 		secrets := make([]map[string]string, len(team.Secrets))
@@ -2816,6 +2822,9 @@ func (cmd *GenerateGitopsCommand) generateSoftware(filePath string, teamID uint,
 			softwareSpec["slug"] = slug
 			if pv := softwareTitle.Packages[0].PinnedVersion; pv != nil && *pv != "" {
 				softwareSpec["version"] = *pv
+			}
+			if d := softwareTitle.Packages[0].UpdateDelay; d != nil && d.AppDays != nil {
+				softwareSpec["update_delay_days"] = *d.AppDays
 			}
 		case len(sw.Packages) > 0:
 			packages = append(packages, softwareSpec)

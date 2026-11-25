@@ -1104,6 +1104,9 @@ type SoftwarePackageSpec struct {
 	// FMA
 	Slug    *string `json:"slug"`
 	Version string  `json:"version"`
+	// UpdateDelayDays is the per-app update delay. nil clears it so the fleet or
+	// org setting applies.
+	UpdateDelayDays *uint `json:"update_delay_days,omitempty"`
 
 	// ReferencedYamlPath is the resolved path of the file used to fill the
 	// software package. Only present after parsing a GitOps file on the fleetctl
@@ -1159,6 +1162,7 @@ type MaintainedAppSpec struct {
 	InstallDuringSetup      optjson.Bool          `json:"setup_experience"`
 	SetupExperiencePlatform optjson.String        `json:"setup_experience_platform,omitzero"`
 	Icon                    TeamSpecSoftwareAsset `json:"icon"`
+	UpdateDelayDays         *uint                 `json:"update_delay_days,omitempty"`
 }
 
 func (spec MaintainedAppSpec) ToSoftwarePackageSpec() SoftwarePackageSpec {
@@ -1178,6 +1182,7 @@ func (spec MaintainedAppSpec) ToSoftwarePackageSpec() SoftwarePackageSpec {
 		Icon:                    spec.Icon,
 		Categories:              spec.Categories,
 		DisplayName:             spec.DisplayName,
+		UpdateDelayDays:         spec.UpdateDelayDays,
 	}
 }
 
