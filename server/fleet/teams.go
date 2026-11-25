@@ -1112,15 +1112,21 @@ func TeamSpecFromTeam(t *Team) (*TeamSpec, error) {
 		integrations.GoogleCalendar = t.Config.Integrations.GoogleCalendar
 	}
 
+	var fmaSettings *FleetMaintainedAppSettings
+	if t.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid {
+		fmaSettings = &t.Config.FleetMaintainedAppSettings
+	}
+
 	return &TeamSpec{
-		Name:               t.Name,
-		AgentOptions:       agentOptions,
-		Features:           &featuresJSON,
-		Secrets:            &secrets,
-		MDM:                mdmSpec,
-		HostExpirySettings: &t.Config.HostExpirySettings,
-		WebhookSettings:    webhookSettings,
-		Integrations:       integrations,
-		Software:           t.Config.Software,
+		Name:                       t.Name,
+		AgentOptions:               agentOptions,
+		Features:                   &featuresJSON,
+		Secrets:                    &secrets,
+		MDM:                        mdmSpec,
+		HostExpirySettings:         &t.Config.HostExpirySettings,
+		WebhookSettings:            webhookSettings,
+		Integrations:               integrations,
+		Software:                   t.Config.Software,
+		FleetMaintainedAppSettings: fmaSettings,
 	}, nil
 }

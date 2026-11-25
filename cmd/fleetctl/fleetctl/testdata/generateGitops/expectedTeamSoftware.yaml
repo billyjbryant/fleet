@@ -34,6 +34,7 @@ fleet_maintained_apps:
       - Label A
       - Label B
     self_service: true
+    update_delay_days: 5
     version: "10.0"
   - slug: fma3/windows
     self_service: true

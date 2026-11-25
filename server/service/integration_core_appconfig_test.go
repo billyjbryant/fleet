@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server/config"
 	"github.com/fleetdm/fleet/v4/server/datastore/mysql/mysqltest"
 	"github.com/fleetdm/fleet/v4/server/fleet"
@@ -1925,6 +1926,29 @@ func (s *integrationTestSuite) TestAppConfig() {
   }`), http.StatusUnprocessableEntity)
 	errMsg = extractServerErrorText(res.Body)
 	assert.Contains(t, errMsg, "missing or invalid license")
+
+	// try to set the Fleet-maintained app update delay, which is premium only
+	res = s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{
+		"fleet_maintained_app_settings": {"update_delay_days": 7}
+  }`), http.StatusUnprocessableEntity)
+	errMsg = extractServerErrorText(res.Body)
+	assert.Contains(t, errMsg, "missing or invalid license")
+
+	// a stored update delay (e.g. after a downgrade) can still be cleared without premium
+	appCfg, err = s.ds.AppConfig(ctx)
+	require.NoError(t, err)
+	appCfg.FleetMaintainedAppSettings.UpdateDelayDays = optjson.SetInt(5)
+	require.NoError(t, s.ds.SaveAppConfig(ctx, appCfg))
+	res = s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{
+		"fleet_maintained_app_settings": {"update_delay_days": 9}
+  }`), http.StatusUnprocessableEntity)
+	assert.Contains(t, extractServerErrorText(res.Body), "missing or invalid license")
+	s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{
+		"fleet_maintained_app_settings": {"update_delay_days": null}
+  }`), http.StatusOK)
+	appCfg, err = s.ds.AppConfig(ctx)
+	require.NoError(t, err)
+	assert.False(t, appCfg.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
 
 	// try to enable Windows MDM, impossible without the WSTEP certs
 	// (only set in mdm integrations tests)

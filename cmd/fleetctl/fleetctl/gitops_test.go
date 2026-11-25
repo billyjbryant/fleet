@@ -10359,3 +10359,121 @@ policies:
 	require.ErrorContains(t, err, `"hidden" and "conditional_access_enabled" cannot both be set`)
 	require.Empty(t, appliedSpecs)
 }
+
+func TestGitOpsOrgFleetMaintainedAppSettings(t *testing.T) {
+	license := &fleet.LicenseInfo{Tier: fleet.TierPremium, Expiration: time.Now().Add(24 * time.Hour)}
+	_, ds := testing_utils.RunServerWithMockedDS(t, &service.TestServerOpts{License: license, KeyValueStore: testing_utils.NewMemKeyValueStore()})
+	setupEmptyGitOpsMocks(ds)
+
+	stored := &fleet.AppConfig{FleetMaintainedAppSettings: fleet.FleetMaintainedAppSettings{UpdateDelayDays: optjson.SetInt(9)}}
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
+		cfg := *stored
+		return &cfg, nil
+	}
+	ds.SaveAppConfigFunc = func(ctx context.Context, config *fleet.AppConfig) error {
+		stored = config
+		return nil
+	}
+	ds.ApplyEnrollSecretsFunc = func(ctx context.Context, teamID *uint, secrets []*fleet.EnrollSecret) error { return nil }
+
+	const base = `
+controls:
+queries:
+policies:
+agent_options:
+org_settings:
+  server_settings:
+    server_url: https://fleet.example.com
+  org_info:
+    contact_url: https://example.com/contact
+    org_name: GitOps Test
+  secrets:
+`
+	write := func(extra string) string {
+		f, err := os.CreateTemp(t.TempDir(), "*.yml")
+		require.NoError(t, err)
+		_, err = f.WriteString(base + extra)
+		require.NoError(t, err)
+		return f.Name()
+	}
+
+	withDelay := write("  fleet_maintained_app_settings:\n    update_delay_days: 14\n")
+	_ = runAppForTest(t, []string{"gitops", "-f", withDelay, "--dry-run"})
+	assert.Equal(t, optjson.SetInt(9), stored.FleetMaintainedAppSettings.UpdateDelayDays, "dry run must not change the stored value")
+	_ = runAppForTest(t, []string{"gitops", "-f", withDelay})
+	assert.True(t, stored.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+	assert.Equal(t, 14, stored.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+
+	// Omitting the key clears the stored value.
+	_ = runAppForTest(t, []string{"gitops", "-f", write("")})
+	assert.False(t, stored.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	_, err := runAppNoChecks([]string{"gitops", "-f", write("  fleet_maintained_app_settings:\n    update_delay_days: 400\n")})
+	require.ErrorContains(t, err, "update_delay_days")
+}
+
+func TestGitOpsTeamFleetMaintainedAppSettings(t *testing.T) {
+	license := &fleet.LicenseInfo{Tier: fleet.TierPremium, Expiration: time.Now().Add(24 * time.Hour)}
+	_, ds := testing_utils.RunServerWithMockedDS(t, &service.TestServerOpts{License: license, KeyValueStore: testing_utils.NewMemKeyValueStore()})
+	setupEmptyGitOpsMocks(ds)
+
+	saved := &fleet.Team{
+		ID:       1,
+		Name:     teamName,
+		Filename: new("team.yml"),
+		Config:   fleet.TeamConfig{FleetMaintainedAppSettings: fleet.FleetMaintainedAppSettings{UpdateDelayDays: optjson.SetInt(9)}},
+	}
+	ds.TeamByNameFunc = func(ctx context.Context, name string) (*fleet.Team, error) {
+		if name == teamName {
+			cp := *saved
+			return &cp, nil
+		}
+		return nil, &notFoundError{}
+	}
+	ds.TeamByFilenameFunc = func(ctx context.Context, filename string) (*fleet.Team, error) {
+		cp := *saved
+		return &cp, nil
+	}
+	ds.TeamLiteFunc = func(ctx context.Context, tid uint) (*fleet.TeamLite, error) {
+		return saved.ToTeamLite(), nil
+	}
+	ds.SaveTeamFunc = func(ctx context.Context, team *fleet.Team) (*fleet.Team, error) {
+		saved = team
+		return team, nil
+	}
+	ds.IsEnrollSecretAvailableFunc = func(ctx context.Context, secret string, isNew bool, teamID *uint) (bool, error) {
+		return true, nil
+	}
+	ds.ApplyEnrollSecretsFunc = func(ctx context.Context, teamID *uint, secrets []*fleet.EnrollSecret) error { return nil }
+
+	const base = `
+controls:
+queries:
+policies:
+agent_options:
+labels:
+name: ` + teamName + `
+software:
+settings:
+  secrets:
+    - secret: TestSecret
+`
+	write := func(extra string) string {
+		f, err := os.CreateTemp(t.TempDir(), "*.yml")
+		require.NoError(t, err)
+		_, err = f.WriteString(base + extra)
+		require.NoError(t, err)
+		return f.Name()
+	}
+
+	withDelay := write("  fleet_maintained_app_settings:\n    update_delay_days: 21\n")
+	_ = runAppForTest(t, []string{"gitops", "-f", withDelay, "--dry-run"})
+	assert.Equal(t, optjson.SetInt(9), saved.Config.FleetMaintainedAppSettings.UpdateDelayDays, "dry run must not change the stored value")
+	_ = runAppForTest(t, []string{"gitops", "-f", withDelay})
+	assert.Equal(t, 21, saved.Config.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+	assert.True(t, saved.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+
+	// Omitting the key clears the stored value.
+	_ = runAppForTest(t, []string{"gitops", "-f", write("")})
+	assert.False(t, saved.Config.FleetMaintainedAppSettings.UpdateDelayDays.Valid)
+}

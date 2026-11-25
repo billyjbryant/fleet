@@ -123,6 +123,8 @@ type SoftwareInstaller struct {
 	FleetMaintainedAppSlug  string                   `json:"fleet_maintained_app_slug,omitempty" db:"fleet_maintained_app_slug"`
 	FleetMaintainedVersions []FleetMaintainedVersion `json:"fleet_maintained_versions,omitempty"`
 	PinnedVersion           *string                  `json:"pinned_version,omitempty" db:"-"`
+	// UpdateDelay is the effective update delay of a Fleet-maintained app.
+	UpdateDelay *FMAUpdateDelayStatus `json:"update_delay,omitempty" db:"-"`
 	// AutomaticInstallPolicies is the list of policies that trigger automatic
 	// installation of this software.
 	AutomaticInstallPolicies []AutomaticInstallPolicy `json:"automatic_install_policies" db:"-"`
@@ -824,6 +826,9 @@ type UpdateSoftwareInstallerPayload struct {
 	DisplayName *string
 	// Pins a Fleet-maintained app to a specific or major version
 	PinnedVersion *string
+	// UpdateDelayDays is the per-app update delay of a Fleet-maintained app: an
+	// empty string clears it, an integer sets it, and nil leaves it unchanged.
+	UpdateDelayDays *string
 	// Configuration is the in-house app's managed app configuration as raw XML bytes (iOS / iPadOS only). nil means leave unchanged; explicit empty means clear.
 	Configuration []byte
 	// Patch enables or disables the title's patch policy. FMA-only.
@@ -847,7 +852,7 @@ func (u *UpdateSoftwareInstallerPayload) IsNoopPayload(existing *SoftwareTitle) 
 		u.InstallScript == nil && u.PostInstallScript == nil && u.UninstallScript == nil &&
 		u.LabelsIncludeAny == nil && u.LabelsExcludeAny == nil && u.LabelsIncludeAll == nil &&
 		u.DisplayName == nil && u.CategoryIDs == nil && u.Configuration == nil &&
-		u.PinnedVersion == nil && u.Patch == nil && u.PatchWhenClosed == nil &&
+		u.PinnedVersion == nil && u.UpdateDelayDays == nil && u.Patch == nil && u.PatchWhenClosed == nil &&
 		u.NotifyBeforePatching == nil && u.PatchDeadline == nil
 }
 
@@ -1099,6 +1104,9 @@ type SoftwarePackageSpec struct {
 	// FMA
 	Slug    *string `json:"slug"`
 	Version string  `json:"version"`
+	// UpdateDelayDays is the per-app update delay. nil clears it so the fleet or
+	// org setting applies.
+	UpdateDelayDays *uint `json:"update_delay_days,omitempty"`
 
 	// ReferencedYamlPath is the resolved path of the file used to fill the
 	// software package. Only present after parsing a GitOps file on the fleetctl
@@ -1154,6 +1162,7 @@ type MaintainedAppSpec struct {
 	InstallDuringSetup      optjson.Bool          `json:"setup_experience"`
 	SetupExperiencePlatform optjson.String        `json:"setup_experience_platform,omitzero"`
 	Icon                    TeamSpecSoftwareAsset `json:"icon"`
+	UpdateDelayDays         *uint                 `json:"update_delay_days,omitempty"`
 }
 
 func (spec MaintainedAppSpec) ToSoftwarePackageSpec() SoftwarePackageSpec {
@@ -1173,6 +1182,7 @@ func (spec MaintainedAppSpec) ToSoftwarePackageSpec() SoftwarePackageSpec {
 		Icon:                    spec.Icon,
 		Categories:              spec.Categories,
 		DisplayName:             spec.DisplayName,
+		UpdateDelayDays:         spec.UpdateDelayDays,
 	}
 }
 

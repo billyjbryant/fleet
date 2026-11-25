@@ -506,3 +506,16 @@ func TestTeamNameKey(t *testing.T) {
 	// A mark only counts right after its letter: here the breve follows a space and the digit.
 	assert.Equal(t, "и1", TeamNameKey("и \u0306 1\u0306"))
 }
+
+func TestTeamSpecFromTeamFleetMaintainedAppSettings(t *testing.T) {
+	team := &Team{Name: "t"}
+	spec, err := TeamSpecFromTeam(team)
+	require.NoError(t, err)
+	require.Nil(t, spec.FleetMaintainedAppSettings)
+
+	team.Config.FleetMaintainedAppSettings = FleetMaintainedAppSettings{UpdateDelayDays: optjson.SetInt(12)}
+	spec, err = TeamSpecFromTeam(team)
+	require.NoError(t, err)
+	require.NotNil(t, spec.FleetMaintainedAppSettings)
+	require.Equal(t, 12, spec.FleetMaintainedAppSettings.UpdateDelayDays.Value)
+}

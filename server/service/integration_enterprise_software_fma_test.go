@@ -3796,3 +3796,126 @@ func (s *integrationEnterpriseTestSuite) TestFleetMaintainedAppVersionPin() {
 	waitBatchSetSoftwareInstallersCompleted(t, &s.withServer, team.Name, emptyResp.RequestUUID)
 	require.Zero(t, teamPinCount(), "removing all software via GitOps must delete all team pins")
 }
+
+func (s *integrationEnterpriseTestSuite) TestFMAUpdateDelayEditAndRead() {
+	t := s.T()
+
+	zoom := &fmaTestState{
+		version:        "1.0",
+		installerBytes: []byte("zoom-1.0"),
+		installerPath:  "/zoom.msi",
+		patchQuery:     "SELECT 1 FROM osquery_info;",
+	}
+	startFMAServers(t, s.ds, map[string]*fmaTestState{"/zoom/windows.json": zoom})
+
+	var teamResp teamResponse
+	s.DoJSON("POST", "/api/latest/fleet/fleets", &createTeamRequest{Name: new("fma_delay_" + t.Name())}, http.StatusOK, &teamResp)
+	team := *teamResp.Team
+
+	batchSet := func() uint {
+		var resp batchSetSoftwareInstallersResponse
+		s.DoJSON("POST", "/api/latest/fleet/software/batch",
+			batchSetSoftwareInstallersRequest{Software: []*fleet.SoftwareInstallerPayload{{Slug: new("zoom/windows")}}, TeamName: team.Name},
+			http.StatusAccepted, &resp, "fleet_name", team.Name)
+		pkgs := waitBatchSetSoftwareInstallersCompleted(t, &s.withServer, team.Name, resp.RequestUUID)
+		require.NotEmpty(t, pkgs)
+		require.NotNil(t, pkgs[0].TitleID)
+		return *pkgs[0].TitleID
+	}
+	titleID := batchSet()
+
+	getPkg := func() *fleet.SoftwareInstaller {
+		var resp getSoftwareTitleResponse
+		s.DoJSON("GET", fmt.Sprintf("/api/latest/fleet/software/titles/%d", titleID), nil, http.StatusOK, &resp, "fleet_id", fmt.Sprint(team.ID))
+		require.NotNil(t, resp.SoftwareTitle)
+		require.NotEmpty(t, resp.SoftwareTitle.Packages)
+		return &resp.SoftwareTitle.Packages[0]
+	}
+	patchDelay := func(id uint, value string, status int) {
+		body, headers := generateMultipartRequest(t, "", "", nil, s.token, map[string][]string{
+			"fleet_id":          {fmt.Sprint(team.ID)},
+			"update_delay_days": {value},
+		})
+		s.DoRawWithHeaders("PATCH", fmt.Sprintf("/api/latest/fleet/software/titles/%d/package", id), body.Bytes(), status, headers).Body.Close()
+	}
+
+	// Nothing set anywhere: the default applies.
+	delay := getPkg().UpdateDelay
+	require.NotNil(t, delay)
+	require.Equal(t, fleet.FMAUpdateDelayStatus{Days: 0, Source: fleet.FMAUpdateDelaySourceDefault}, *delay)
+
+	// Setting a value reports source "app" and records it on the activity.
+	patchDelay(titleID, "3", http.StatusOK)
+	delay = getPkg().UpdateDelay
+	require.NotNil(t, delay)
+	require.Equal(t, fleet.FMAUpdateDelayStatus{Days: 3, Source: fleet.FMAUpdateDelaySourceApp, AppDays: new(uint(3))}, *delay)
+	s.lastActivityMatches(fleet.ActivityTypeEditedSoftware{}.ActivityName(), fmt.Sprintf(
+		`{"fleet_id": %d, "fleet_name": %q, "self_service": false, `+
+			`"software_title": "Zoom Workplace (X64)", "software_package": "zoom.msi", "software_icon_url": null, `+
+			`"software_title_id": %d, "software_display_name": "", "pinned_version": null, "update_delay_days": 3}`,
+		team.ID, team.Name, titleID), 0)
+
+	// An empty value clears it and inherits again.
+	patchDelay(titleID, "", http.StatusOK)
+	delay = getPkg().UpdateDelay
+	require.NotNil(t, delay)
+	require.Equal(t, fleet.FMAUpdateDelaySourceDefault, delay.Source)
+	require.Nil(t, delay.AppDays)
+	s.lastActivityMatches(fleet.ActivityTypeEditedSoftware{}.ActivityName(), fmt.Sprintf(
+		`{"fleet_id": %d, "fleet_name": %q, "self_service": false, `+
+			`"software_title": "Zoom Workplace (X64)", "software_package": "zoom.msi", "software_icon_url": null, `+
+			`"software_title_id": %d, "software_display_name": "", "pinned_version": null, "update_delay_cleared": true}`,
+		team.ID, team.Name, titleID), 0)
+
+	// The org default applies once the per-app value is gone.
+	s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings": {"update_delay_days": 3}}`), http.StatusOK)
+	t.Cleanup(func() {
+		s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings": {"update_delay_days": null}}`), http.StatusOK)
+	})
+	delay = getPkg().UpdateDelay
+	require.NotNil(t, delay)
+	require.Equal(t, uint(3), delay.Days)
+	require.Equal(t, fleet.FMAUpdateDelaySourceOrg, delay.Source)
+	require.Nil(t, delay.PendingVersion)
+
+	// A newer cached version that hasn't waited out the delay is pending.
+	zoom.version = "2.0"
+	zoom.installerBytes = []byte("zoom-2.0")
+	zoom.ComputeSHA(zoom.installerBytes)
+	batchSet()
+	pkg := getPkg()
+	require.Equal(t, "1.0", pkg.Version)
+	require.NotNil(t, pkg.UpdateDelay)
+	require.NotNil(t, pkg.UpdateDelay.PendingVersion)
+	require.Equal(t, "2.0", *pkg.UpdateDelay.PendingVersion)
+	require.NotNil(t, pkg.UpdateDelay.PromotesAt)
+	var firstSeen time.Time
+	for _, v := range pkg.FleetMaintainedVersions {
+		if v.Version == "2.0" {
+			firstSeen = v.FirstSeenAt
+		}
+	}
+	require.False(t, firstSeen.IsZero())
+	require.True(t, firstSeen.Add(3*24*time.Hour).Equal(*pkg.UpdateDelay.PromotesAt))
+	require.Equal(t, time.UTC, pkg.UpdateDelay.PromotesAt.Location())
+
+	// A per-app value overrides the org's and the pending version tracks it.
+	patchDelay(titleID, "5", http.StatusOK)
+	pkg = getPkg()
+	require.Equal(t, fleet.FMAUpdateDelaySourceApp, pkg.UpdateDelay.Source)
+	require.True(t, firstSeen.Add(5*24*time.Hour).Equal(*pkg.UpdateDelay.PromotesAt))
+
+	// Invalid values.
+	for _, bad := range []string{"-1", "366", "1.5", "abc"} {
+		patchDelay(titleID, bad, http.StatusUnprocessableEntity)
+	}
+
+	// Only Fleet-maintained apps take a delay.
+	s.uploadSoftwareInstaller(t, &fleet.UploadSoftwareInstallerPayload{
+		InstallScript: "echo install",
+		Filename:      "ruby.deb",
+		TeamID:        &team.ID,
+	}, http.StatusOK, "")
+	customTitleID := getSoftwareTitleID(t, s.ds, "ruby", "deb_packages")
+	patchDelay(customTitleID, "3", http.StatusBadRequest)
+}

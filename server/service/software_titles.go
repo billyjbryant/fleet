@@ -12,6 +12,8 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	maintained_apps "github.com/fleetdm/fleet/v4/server/mdm/maintainedapps"
+	"github.com/fleetdm/fleet/v4/server/ptr"
 )
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -226,6 +228,7 @@ func (svc *Service) SoftwareTitleByID(ctx context.Context, id uint, teamID *uint
 					}
 				}
 
+				delayResolver := maintained_apps.NewUpdateDelayResolver(svc.ds)
 				for _, pkg := range pkgs {
 					summary, err := svc.ds.GetSummaryHostSoftwareInstalls(ctx, pkg.InstallerID)
 					if err != nil {
@@ -255,6 +258,22 @@ func (svc *Service) SoftwareTitleByID(ctx context.Context, id uint, teamID *uint
 							return nil, ctxerr.Wrap(ctx, err, "get pinned version")
 						}
 						pkg.PinnedVersion = pinnedVersion
+
+						appDelay, err := svc.ds.GetFMAUpdateDelay(ctx, teamID, id)
+						if err != nil {
+							return nil, ctxerr.Wrap(ctx, err, "get update delay")
+						}
+						days, source, err := delayResolver.Resolve(ctx, teamID, appDelay)
+						if err != nil {
+							return nil, ctxerr.Wrap(ctx, err, "resolve update delay")
+						}
+						delayStatus := &fleet.FMAUpdateDelayStatus{Days: days, Source: source, AppDays: appDelay}
+						delay := maintained_apps.UpdateDelayDuration(days)
+						if pending, ok := maintained_apps.PendingVersion(fmaVersions, pkg.InstallerID, ptr.ValOrZero(pinnedVersion), delay, time.Now()); ok {
+							delayStatus.PendingVersion = &pending.Version
+							delayStatus.PromotesAt = new(pending.FirstSeenAt.Add(delay).UTC())
+						}
+						pkg.UpdateDelay = delayStatus
 
 						patchPolicy, err := svc.ds.GetPatchPolicy(ctx, teamID, id)
 						if err != nil && !fleet.IsNotFound(err) {

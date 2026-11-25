@@ -463,6 +463,9 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 
 	// Handle in house apps separately
 	if software.InHouseAppCount == 1 {
+		if payload.UpdateDelayDays != nil {
+			return nil, &fleet.BadRequestError{Message: `Couldn't update. "update_delay_days" can be only specified for a software title that has a Fleet-maintained app.`}
+		}
 		return svc.updateInHouseAppInstaller(ctx, payload, vc, teamName, software)
 	}
 
@@ -835,6 +838,32 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 		dirty["PinnedVersion"] = true
 	}
 
+	var newUpdateDelay *uint // nil clears the per-app delay
+	if payload.UpdateDelayDays != nil {
+		if existingInstaller.FleetMaintainedAppID == nil {
+			return nil, &fleet.BadRequestError{
+				Message: `Couldn't update. "update_delay_days" can be only specified for a software title that has a Fleet-maintained app.`,
+			}
+		}
+		if raw := *payload.UpdateDelayDays; raw != "" {
+			days, err := strconv.ParseUint(raw, 10, 32)
+			if err != nil || days > fleet.MaxFMAUpdateDelayDays {
+				return nil, fleet.NewInvalidArgumentError("update_delay_days",
+					fmt.Sprintf("must be an integer between 0 and %d", fleet.MaxFMAUpdateDelayDays))
+			}
+			newUpdateDelay = new(uint(days))
+		}
+		currentDelay, err := svc.ds.GetFMAUpdateDelay(ctxdb.RequirePrimary(ctx, true), payload.TeamID, payload.TitleID)
+		if err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "getting Fleet-maintained app update delay")
+		}
+		if !ptr.Equal(currentDelay, newUpdateDelay) {
+			dirty["UpdateDelayDays"] = true
+			activity.UpdateDelayDays = newUpdateDelay
+			activity.UpdateDelayCleared = newUpdateDelay == nil
+		}
+	}
+
 	fieldsShouldSideEffect := map[string]struct{}{
 		"InstallerFile":     {},
 		"InstallScript":     {},
@@ -862,12 +891,18 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 
 	// persist changes starting here, now that we've done all the validation/diffing we can
 	if len(dirty) > 0 {
+		// The update delay lives in its own table, so it never needs the installer rewritten.
+		installerDirty := len(dirty)
+		if dirty["UpdateDelayDays"] {
+			installerDirty--
+		}
 		switch {
-		case len(dirty) == 1 && dirty["SelfService"]: // only self-service changed; use lighter update function
+		case installerDirty == 0:
+		case installerDirty == 1 && dirty["SelfService"]: // only self-service changed; use lighter update function
 			if err := svc.ds.UpdateInstallerSelfServiceFlag(ctx, *payload.SelfService, existingInstaller.InstallerID); err != nil {
 				return nil, ctxerr.Wrap(ctx, err, "updating installer self service flag")
 			}
-		case len(dirty) == 1 && dirty["PinnedVersion"]: // only the pinned version changed; flip the active installer rather than rewriting it
+		case installerDirty == 1 && dirty["PinnedVersion"]: // only the pinned version changed; flip the active installer rather than rewriting it
 			// SetFleetMaintainedAppActiveInstaller also redirects installs frozen on
 			// the version we pinned away from to the newly-active one.
 			if err := svc.ds.SetFleetMaintainedAppActiveInstaller(ctx, payload, activeInstallerID); err != nil {
@@ -954,6 +989,17 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 			// even if side effects fail.
 			if err := svc.ds.ProcessInstallerUpdateSideEffects(ctx, existingInstaller.InstallerID, shouldDoSideEffects, dirty["Package"]); err != nil {
 				return nil, err
+			}
+		}
+
+		if dirty["UpdateDelayDays"] {
+			if newUpdateDelay == nil {
+				err = svc.ds.DeleteFMAUpdateDelay(ctx, payload.TeamID, payload.TitleID)
+			} else {
+				err = svc.ds.SetFMAUpdateDelay(ctx, payload.TeamID, payload.TitleID, *newUpdateDelay)
+			}
+			if err != nil {
+				return nil, ctxerr.Wrap(ctx, err, "saving Fleet-maintained app update delay")
 			}
 		}
 
@@ -3653,6 +3699,7 @@ func (svc *Service) softwareBatchUpload(
 				Categories:               p.Categories.Value,
 				DisplayName:              p.DisplayName,
 				RollbackVersion:          p.RollbackVersion,
+				FMAUpdateDelayDays:       p.UpdateDelayDays,
 				Configuration:            p.Configuration,
 			}
 

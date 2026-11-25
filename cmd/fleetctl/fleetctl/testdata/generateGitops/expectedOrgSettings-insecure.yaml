@@ -76,6 +76,8 @@ fleet_desktop:
 gitops:
   gitops_mode_enabled: false
   repository_url: https://github.com/fleetdm/fleet/tree/main/it-and-security
+fleet_maintained_app_settings:
+  update_delay_days: 7
 host_expiry_settings:
   host_expiry_enabled: false
   host_expiry_window: 59995

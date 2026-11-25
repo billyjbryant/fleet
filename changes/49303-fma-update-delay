@@ -1,0 +1,1 @@
+- Added a configurable delay before Fleet-maintained app auto-updates roll out a new version. Set `fleet_maintained_app_settings.update_delay_days` in org settings or fleet settings, or `update_delay_days` on a Fleet-maintained app (also editable via the software edit API). A new version is deployed only after it has been available for the configured number of days (0–365).

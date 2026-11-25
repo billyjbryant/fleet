@@ -190,6 +190,8 @@ settings:
     historical_data:
       uptime: true
       vulnerabilities: true
+  fleet_maintained_app_settings:
+    update_delay_days: 3
   host_expiry_settings:
     host_expiry_enabled: false
     host_expiry_window: 1
@@ -291,6 +293,7 @@ software:
     - Label B
     self_service: true
     slug: fma2/windows
+    update_delay_days: 5
     version: "10.0"
   - self_service: true
     slug: fma3/windows

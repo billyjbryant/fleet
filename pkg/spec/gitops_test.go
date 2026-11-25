@@ -2821,6 +2821,70 @@ software:
 	})
 }
 
+func TestFleetMaintainedAppUpdateDelay(t *testing.T) {
+	t.Parallel()
+
+	appConfig := &fleet.EnrichedAppConfig{}
+	appConfig.License = &fleet.LicenseInfo{Tier: fleet.TierPremium}
+
+	parseTeam := func(t *testing.T, settings, software string) (*GitOps, error) {
+		config := getTeamConfig([]string{"name", "settings", "software"})
+		config += "name: Test Team\n" + settings + software
+		path, basePath := createTempFile(t, "", config)
+		return GitOpsFromFile(path, basePath, appConfig, nopLogf)
+	}
+
+	t.Run("per-app delay parses", func(t *testing.T) {
+		result, err := parseTeam(t, "settings:\n  secrets:\n", "software:\n  fleet_maintained_apps:\n    - slug: 1password/darwin\n      update_delay_days: 7\n")
+		require.NoError(t, err)
+		require.Len(t, result.Software.FleetMaintainedApps, 1)
+		require.NotNil(t, result.Software.FleetMaintainedApps[0].UpdateDelayDays)
+		assert.EqualValues(t, 7, *result.Software.FleetMaintainedApps[0].UpdateDelayDays)
+		assert.EqualValues(t, 7, *result.Software.FleetMaintainedApps[0].ToSoftwarePackageSpec().UpdateDelayDays)
+	})
+
+	t.Run("per-app delay omitted stays nil", func(t *testing.T) {
+		result, err := parseTeam(t, "settings:\n  secrets:\n", "software:\n  fleet_maintained_apps:\n    - slug: 1password/darwin\n")
+		require.NoError(t, err)
+		assert.Nil(t, result.Software.FleetMaintainedApps[0].UpdateDelayDays)
+	})
+
+	t.Run("per-app delay out of range names the slug", func(t *testing.T) {
+		_, err := parseTeam(t, "settings:\n  secrets:\n", "software:\n  fleet_maintained_apps:\n    - slug: 1password/darwin\n      update_delay_days: 400\n")
+		require.ErrorContains(t, err, "1password/darwin")
+		require.ErrorContains(t, err, "update_delay_days")
+	})
+
+	t.Run("fleet setting parses", func(t *testing.T) {
+		result, err := parseTeam(t, "settings:\n  secrets:\n  fleet_maintained_app_settings:\n    update_delay_days: 3\n", "")
+		require.NoError(t, err)
+		assert.Contains(t, result.TeamSettings, "fleet_maintained_app_settings")
+	})
+
+	t.Run("fleet setting out of range", func(t *testing.T) {
+		_, err := parseTeam(t, "settings:\n  secrets:\n  fleet_maintained_app_settings:\n    update_delay_days: 366\n", "")
+		require.ErrorContains(t, err, "update_delay_days")
+	})
+
+	parseOrg := func(t *testing.T, days string) (*GitOps, error) {
+		config := getGlobalConfig([]string{"org_settings"})
+		config += "org_settings:\n  secrets:\n  server_settings:\n    server_url: https://fleet.example.com\n  org_info:\n    org_name: Test Org\n  fleet_maintained_app_settings:\n    update_delay_days: " + days + "\n"
+		path, basePath := createTempFile(t, "", config)
+		return GitOpsFromFile(path, basePath, appConfig, nopLogf)
+	}
+
+	t.Run("org setting parses", func(t *testing.T) {
+		result, err := parseOrg(t, "14")
+		require.NoError(t, err)
+		assert.Contains(t, result.OrgSettings, "fleet_maintained_app_settings")
+	})
+
+	t.Run("org setting out of range", func(t *testing.T) {
+		_, err := parseOrg(t, "-1")
+		require.ErrorContains(t, err, "update_delay_days")
+	})
+}
+
 func TestWebhookPolicyIDsValidation(t *testing.T) {
 	t.Parallel()
 

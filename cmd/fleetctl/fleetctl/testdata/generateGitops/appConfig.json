@@ -314,5 +314,8 @@
       "secrets": false
     }
   },
-  "scripts": []
+  "scripts": [],
+  "fleet_maintained_app_settings": {
+    "update_delay_days": 7
+  }
 }

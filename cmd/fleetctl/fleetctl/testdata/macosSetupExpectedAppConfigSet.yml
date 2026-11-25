@@ -12,6 +12,8 @@ spec:
     transparency_url: https://fleetdm.com/transparency
     alternative_browser_host: ""
     sso_enabled: false
+  fleet_maintained_app_settings:
+    update_delay_days: null
   host_expiry_settings:
     host_expiry_enabled: false
     host_expiry_window: 0

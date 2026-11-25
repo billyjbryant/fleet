@@ -858,6 +858,7 @@ func (MockClient) GetSoftwareTitleByID(ID uint, teamID *uint) (*fleet.SoftwareTi
 				Platform:             "windows",
 				FleetMaintainedAppID: ptr.Uint(2),
 				PinnedVersion:        new("10.0"),
+				UpdateDelay:          &fleet.FMAUpdateDelayStatus{AppDays: new(uint(5))},
 				// Mirrors the API, which returns the managed app open query while patch_when_closed is on.
 				PreInstallQuery: "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM processes WHERE name = 'My Windows FMA');",
 				PatchPolicy: &fleet.PatchPolicyData{
@@ -2084,6 +2085,31 @@ func TestGenerateTeamSettings(t *testing.T) {
 
 	// Compare.
 	require.Equal(t, expectedAppConfig, TeamSettings)
+}
+
+func TestGenerateFleetMaintainedAppSettingsOmittedWhenUnset(t *testing.T) {
+	fleetClient := &MockClient{}
+	appConfig, err := fleetClient.GetAppConfig()
+	require.NoError(t, err)
+	team, err := fleetClient.GetTeam(1)
+	require.NoError(t, err)
+	appConfig.FleetMaintainedAppSettings = fleet.FleetMaintainedAppSettings{}
+	team.Config.FleetMaintainedAppSettings = fleet.FleetMaintainedAppSettings{}
+
+	cmd := &GenerateGitopsCommand{
+		Client:       fleetClient,
+		CLI:          cli.NewContext(&cli.App{}, nil, nil),
+		Messages:     Messages{},
+		FilesToWrite: make(map[string]interface{}),
+		AppConfig:    appConfig,
+	}
+	orgSettings, err := cmd.generateOrgSettings()
+	require.NoError(t, err)
+	require.NotContains(t, orgSettings, "fleet_maintained_app_settings")
+
+	teamSettings, err := cmd.generateTeamSettings("team.yml", team)
+	require.NoError(t, err)
+	require.NotContains(t, teamSettings, "fleet_maintained_app_settings")
 }
 
 func TestGenerateTeamSettingsInsecure(t *testing.T) {

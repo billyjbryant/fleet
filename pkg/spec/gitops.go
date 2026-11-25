@@ -827,6 +827,7 @@ func parseOrgSettings(raw json.RawMessage, result *GitOps, baseDir string, fileP
 			multiError = validateGitOpsConfig(result.OrgSettings, multiError)
 			multiError = validateSSOConfig(result.OrgSettings, multiError)
 			multiError = normalizeMDMSSOConfig(result.OrgSettings, multiError)
+			multiError = validateFleetMaintainedAppSettings(result.OrgSettings, "org_settings", multiError)
 		}
 
 		// Drop the removed scripts_disabled setting before the unknown-key check. Only warn when it's false.
@@ -1104,9 +1105,31 @@ func parseTeamSettings(raw json.RawMessage, result *GitOps, baseDir string, file
 			multiError = parseSecrets(result, multiError)
 			// Validate webhook settings for regular teams
 			multiError = validateTeamWebhookSettings(result.TeamSettings, multiError)
+			multiError = validateFleetMaintainedAppSettings(result.TeamSettings, "settings", multiError)
 		}
 		// Validate unknown keys in team settings section.
 		multiError = multierror.Append(multiError, validateYAMLKeys(raw, reflect.TypeFor[GitOpsFleetSettings](), settingsFilePath, []string{"settings"})...)
+	}
+	return multiError
+}
+
+// validateFleetMaintainedAppSettings validates the update delay range of the
+// fleet_maintained_app_settings key in an org_settings or settings section.
+func validateFleetMaintainedAppSettings(settings map[string]any, section string, multiError *multierror.Error) *multierror.Error {
+	raw, ok := settings["fleet_maintained_app_settings"]
+	if !ok || raw == nil {
+		return multiError
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return multierror.Append(multiError, fmt.Errorf("'%s.fleet_maintained_app_settings' is invalid: %w", section, err))
+	}
+	var fmaSettings fleet.FleetMaintainedAppSettings
+	if err := json.Unmarshal(b, &fmaSettings); err != nil {
+		return multierror.Append(multiError, fmt.Errorf("'%s.fleet_maintained_app_settings' is invalid: %w", section, err))
+	}
+	if err := fmaSettings.Validate(); err != nil {
+		return multierror.Append(multiError, fmt.Errorf("'%s.fleet_maintained_app_settings': %w", section, err))
 	}
 	return multiError
 }
@@ -2784,6 +2807,10 @@ func validateFleetMaintainedApp(spec fleet.MaintainedAppSpec, resolveDir string)
 	// Validate display_name length (matches database VARCHAR(255))
 	if utf8.RuneCountInString(spec.DisplayName) > 255 {
 		return spec, fmt.Errorf("fleet maintained app %q display_name is too long (max 255 characters)", spec.Slug)
+	}
+
+	if spec.UpdateDelayDays != nil && *spec.UpdateDelayDays > fleet.MaxFMAUpdateDelayDays {
+		return spec, fmt.Errorf("fleet maintained app %q update_delay_days must be between 0 and %d", spec.Slug, fleet.MaxFMAUpdateDelayDays)
 	}
 
 	return spec.ResolveSoftwarePackagePaths(resolveDir), nil

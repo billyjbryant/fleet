@@ -696,6 +696,8 @@ type SoftwareInstallerPayload struct {
 	Slug            *string        `json:"slug"`
 	MaintainedApp   *MaintainedApp `json:"-"`
 	RollbackVersion string         `json:"fleet_maintained_app_version"`
+	// UpdateDelayDays is the per-app update delay; nil clears it.
+	UpdateDelayDays *uint `json:"fleet_maintained_app_update_delay_days,omitempty"`
 
 	IconPath string `json:"-"`
 	IconHash string `json:"-"`

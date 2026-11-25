@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/fleetdm/fleet/v4/pkg/optjson"
 )
@@ -44,6 +45,16 @@ const (
 	FMAUpdateDelaySourceOrg     FMAUpdateDelaySource = "org"
 	FMAUpdateDelaySourceDefault FMAUpdateDelaySource = "default"
 )
+
+// FMAUpdateDelayStatus is the effective update delay of a Fleet-maintained app
+// and the version waiting on it, if any.
+type FMAUpdateDelayStatus struct {
+	Days           uint                 `json:"days"`
+	Source         FMAUpdateDelaySource `json:"source"`
+	AppDays        *uint                `json:"app_update_delay_days"`
+	PendingVersion *string              `json:"pending_version"`
+	PromotesAt     *time.Time           `json:"promotes_at"`
+}
 
 // ResolveFMAUpdateDelay returns the effective update delay, preferring the
 // per-app value, then the fleet setting, then the org setting, then 0. A
