@@ -1156,7 +1156,9 @@ func (svc *Service) ModifyAppConfig(ctx context.Context, p []byte, applyOpts fle
 		return nil, ctxerr.Wrap(ctx, err, "validating MDM config")
 	}
 
-	if !appConfig.FleetMaintainedAppSettings.Equal(oldAppConfig.FleetMaintainedAppSettings) && !lic.IsPremium() {
+	// Clearing is allowed without premium so a downgraded instance can drop a stored value.
+	if appConfig.FleetMaintainedAppSettings.UpdateDelayDays.Valid &&
+		!appConfig.FleetMaintainedAppSettings.Equal(oldAppConfig.FleetMaintainedAppSettings) && !lic.IsPremium() {
 		invalid.Append("fleet_maintained_app_settings.update_delay_days", ErrMissingLicense.Error())
 	}
 	if err := appConfig.FleetMaintainedAppSettings.Validate(); err != nil {
