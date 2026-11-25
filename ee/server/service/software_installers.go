@@ -853,13 +853,14 @@ func (svc *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.
 			}
 			newUpdateDelay = new(uint(days))
 		}
-		currentDelay, err := svc.ds.GetFMAUpdateDelay(ctx, payload.TeamID, payload.TitleID)
+		currentDelay, err := svc.ds.GetFMAUpdateDelay(ctxdb.RequirePrimary(ctx, true), payload.TeamID, payload.TitleID)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "getting Fleet-maintained app update delay")
 		}
 		if !ptr.Equal(currentDelay, newUpdateDelay) {
 			dirty["UpdateDelayDays"] = true
 			activity.UpdateDelayDays = newUpdateDelay
+			activity.UpdateDelayCleared = newUpdateDelay == nil
 		}
 	}
 

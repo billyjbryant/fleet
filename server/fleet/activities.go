@@ -1547,6 +1547,7 @@ type ActivityTypeEditedSoftware struct {
 	SoftwareDisplayName string                  `json:"software_display_name"`
 	PinnedVersion       *string                 `json:"pinned_version"`
 	UpdateDelayDays     *uint                   `json:"update_delay_days,omitempty"`
+	UpdateDelayCleared  bool                    `json:"update_delay_cleared,omitempty"`
 }
 
 func (a ActivityTypeEditedSoftware) ActivityName() string {

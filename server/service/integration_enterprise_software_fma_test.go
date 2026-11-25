@@ -3861,6 +3861,11 @@ func (s *integrationEnterpriseTestSuite) TestFMAUpdateDelayEditAndRead() {
 	require.NotNil(t, delay)
 	require.Equal(t, fleet.FMAUpdateDelaySourceDefault, delay.Source)
 	require.Nil(t, delay.AppDays)
+	s.lastActivityMatches(fleet.ActivityTypeEditedSoftware{}.ActivityName(), fmt.Sprintf(
+		`{"fleet_id": %d, "fleet_name": %q, "self_service": false, `+
+			`"software_title": "Zoom Workplace (X64)", "software_package": "zoom.msi", "software_icon_url": null, `+
+			`"software_title_id": %d, "software_display_name": "", "pinned_version": null, "update_delay_cleared": true}`,
+		team.ID, team.Name, titleID), 0)
 
 	// The org default applies once the per-app value is gone.
 	s.Do("PATCH", "/api/latest/fleet/config", json.RawMessage(`{"fleet_maintained_app_settings": {"update_delay_days": 3}}`), http.StatusOK)

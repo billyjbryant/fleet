@@ -3727,7 +3727,8 @@ This activity contains the following fields:
 - "labels_exclude_any": Target hosts that don't have any label in the array.
 - "software_display_name": Display name of the software title.
 - "pinned_version": The version a Fleet-maintained app is pinned to — a specific version (e.g. `"149.0.7827.54"`) or a caret major-version constraint (e.g. `"^147"`). `null` when the app automatically updates to the latest version, or when the version wasn't changed.
-- "update_delay_days": The per-app update delay in days that was set on a Fleet-maintained app. Omitted when the delay wasn't changed or was cleared.
+- "update_delay_days": The per-app update delay in days that was set on a Fleet-maintained app. Omitted when the delay wasn't changed or was removed (see `update_delay_cleared`).
+- "update_delay_cleared": `true` when the per-app update delay was removed so the fleet or org setting applies again. Omitted otherwise.
 
 #### Example
 
